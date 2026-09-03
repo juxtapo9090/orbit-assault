@@ -1,0 +1,16 @@
+# orbit.html IS committed: it is the whole game, and a fork should be able to
+# open it without running anything. Regenerate it with `python3 build.py`.
+test.html
+
+# Playtest artefacts
+shots/
+ref/
+__pycache__/
+*.pyc
+
+# Never publish: private keys, tunnel endpoints, ROMs, ripped artwork
+wg/
+*.conf
+*.key
+*.nes
+*.wav
