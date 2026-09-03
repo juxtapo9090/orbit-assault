@@ -104,6 +104,10 @@ Levels are ASCII. `.` empty, `#` solid, `=` one-way platform, `^` spike, `o` pic
 
 ## Forking it
 
+`MANIFEST.md` is the honest state of the project: what is proven, what is half-built,
+and every mistake already paid for. Read it before the code.
+
+
 The interesting seams: `contra.js` is a self-contained enemy module behind a four
 function interface, so a completely different bestiary drops in without touching the
 core. Levels are text files. `CONTRACT.md` is the contract every module was written
