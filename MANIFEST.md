@@ -101,7 +101,8 @@ without shipping any state.
 - Relay under a real five-player load: **3.4% of one core, 25 MB, 30x headroom, 1.37ms**.
   This is why it is not worth rewriting in Rust for couch play. A public multi-room
   server is a different question and the honest moment to hand it to Luc.
-- Four real humans played it together over a VPN.
+- Four real humans played it together over a VPN, reached stages 2 and 3, and killed
+  bosses. Coop across a stage transition works.
 
 **Not proven / not done:**
 
@@ -111,9 +112,12 @@ without shipping any state.
   to the join tick**, and the title screen has no "join a running game" path. The core
   half that *is* done: dormant slots, `pendingAct`, `applyActivations()` inside the tick,
   and the `onActivate` subscription. This is the next job and it is well-teed-up.
-- A human has never killed the stage-one boss. The headless bot cannot aim; the boss
-  pipeline is proven in the node test and one port died to real bullets in Chrome.
-- Never tested with all five slots occupied by real people, nor stages 2 and 3 in coop.
+- **Every stage has the same boss.** `contra.js` builds one boss type from the `B` glyph,
+  so stage 3 fights what stage 1 fought. This is the loudest gameplay gap and the most
+  obvious first thing for a forker to fix: give `B` a variant (a glyph argument, or a
+  per-level boss table) and change the attack pattern per stage. Reported from real play,
+  2026-09-04.
+- Never tested with all five slots occupied by real people.
 - The public export is a hand-made copy. It does not update itself when this folder moves
   on, and it must be re-scrubbed (no no `ref/`, no ROM, no household names) if
   regenerated.
