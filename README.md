@@ -31,9 +31,20 @@ and a 16-bit pixel cast — all in one `orbit.html` you can open from disk.
   dashboard on the same port. Nothing to `pip install`.
 - **Levels that are proven playable before they ship.** `verify_level.py` simulates the
   real player physics and refuses to build a level whose goal cannot be reached.
+- **A different boss for every stage.** Four of them, each teaching one thing: a
+  ground-bound dreadnought you learn a pattern against, a warboss that closes the
+  distance and throws adds while you wait for its one opening, a flyer that makes you
+  aim upward and times its shield phases against your damage, and a sorcerer that
+  telegraphs, blinks and opens a portal you have to decide whether you can afford
+  to close.
+- **Co-op that costs you something.** A player who dies leaves a beacon where they
+  fell. A teammate has to walk back to it and stand there for three seconds — and the
+  camera only ever scrolls forward, so saving somebody means giving up ground.
 - **It scales itself to the machine.** Three quality tiers, picked from measured frame
   rate and applied to canvas scale and lighting quality, so a laptop and a desktop can
-  sit in the same lobby.
+  sit in the same lobby. The tier can climb during a run if the machine turns out to
+  have headroom, and never falls — a picture that only improves is one nobody has to
+  think about.
 
 ## Play it
 
@@ -97,7 +108,7 @@ agree on every byte of game state. That separation is the reason the tiers are s
 | path | what |
 |---|---|
 | `orbit.src.html` | the core: simulation, players, bullets, camera, HUD, lobby, loop |
-| `contra.js` | enemies: runners, snipers, turrets, spawners, weapon pods, the wall boss |
+| `contra.js` | enemies: runners, snipers, turrets, spawners, weapon pods, the four bosses, the mini-boss gates, the revive beacons |
 | `net.js` | lobby, input exchange, input-log replay for mid-run joins |
 | `input.js` | keyboard, gamepad and touch, merged into the one input byte |
 | `relay.py` | the WebSocket relay, input recorder, and dashboard |
@@ -116,7 +127,7 @@ Levels are ASCII. `.` empty, `#` solid, `=` one-way platform, `^` spike, `o` pic
 ## Tests
 
 ```
-node test_contra.js        # enemies, boss, and same-seed determinism
+node test_contra.js        # enemies, all four bosses, and same-seed determinism
 node test_net.js           # relay + client, including mid-run join and drop/retake
 python3 test_relay_frames.py
 python3 drive.py           # headless Chrome: solo smoke run, screenshots, console errors
@@ -126,6 +137,8 @@ python3 drive_bomb.py      # bombs: edge trigger, pool reuse, blast, refill
 python3 drive_tier.py      # auto-quality: thresholds, application, CPU-throttled probe
 python3 drive_anim.py      # walk cycle and aim poses: which sheet each input picks
 python3 drive_boss.py 231  # warp to a column and fight the boss
+python3 drive_bosses.py    # one boss per stage: identity, behaviour, and the bar moving
+python3 drive_depth.py     # flamethrower cone, mini-boss gate, tier promotion, revive
 ```
 
 `drive_coop.py` is the one that matters: it runs two real browsers against a real relay

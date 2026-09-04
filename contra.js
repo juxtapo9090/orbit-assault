@@ -42,6 +42,45 @@
   var HAWK_TIME = 2.0, HAWK_BOSS = 0.25;
   var BONE = '#E8E0C8', GOLD = '#F0B04A';
 
+  // ---- gameplay depth contract (2026-09-04) ----
+  // One boss per stage, each teaching a different skill. The core names which one
+  // this level fights (W.bossKind) because the core owns the level table; CONTRA
+  // owns what each of them DOES. HP is a multiple of the Dreadnought's 30.
+  var K_DREAD = 0, K_WARBOSS = 1, K_TAU = 2, K_SORC = 3;
+  var BOSS_HP = [30, 45, 60, 75];
+  var BOSS_NAME = ['DREADNOUGHT', 'WARBOSS', 'TAU CMDR', 'SORCERER'];
+
+  // Warboss: rush, wall, stun. The head is only hittable while he is stunned, so
+  // the whole fight is "survive the charge, then cash the opening".
+  var WB_IDLE = 2.0, WB_STUN = 3.0, WB_SPEED = 300, WB_THROW = 0.8, WB_ADDS = 2;
+  // Tau: hovers, so there is no safe ground — you have to aim up. No weak-point
+  // gating (always hittable while airborne); the shield phases are the gate.
+  var TAU_HOVER = 1.1, TAU_BURST = 0.16, TAU_SHIELD = 3.0, TAU_MISSILES = 2;
+  var TAU_STEP = 0.2;                          // HP fraction between shield phases
+  // Sorcerer: never stands still. Telegraph, strike, blink. The portal is the
+  // real decision — kill it and the adds stop, ignore it and you drown.
+  var SORC_TELE = 2.0, SORC_RECOVER = 0.5, SORC_BLINK = 0.5;
+  var SORC_PORTAL_CD = 30, SORC_PORTAL_HP = 30, SORC_PORTAL_SPAWN = 5.0;
+  var BOLT_DMG_R = 9;                          // how near the bolt line still burns
+  var WARP = '#E86FF0', WARP_LO = '#8A3FB0', TAU_BLUE = '#7FD2F0', ORK = '#63C08A';
+
+  // Flamethrower. Not a gun: no projectile, no pool slot, just a cone test on a
+  // 3-tick clock. Low per-hit and area, so it trades reach for crowd control.
+  var FLAME_LEN = 4 * TS, FLAME_COS = Math.cos(30 * Math.PI / 180);  // 60deg spread
+  var FLAME_TICKS = 3, FLAME_FUEL = 10.0;
+  var FIRE_HI = '#FFE9A8', FIRE = '#FF9A2A', FIRE_LO = '#D2381C';
+
+  // Co-op revive. A dead player leaves a beacon where they fell; a teammate has to
+  // walk back to it, which costs the team forward progress — that is the point.
+  var BEACON_LIFE = 15, BEACON_R = 2 * TS, BEACON_HOLD = 3.0, REVIVE_INV = 3.0;
+
+  // Mini-boss gates, at GLOBAL columns (the same count the parallax stages use), so
+  // each of the first three stages gets exactly one and stage four gets none — there
+  // the boss IS the gate.
+  var GATE_COLS = [100, 300, 500];
+  var GATE_MIN = 8, GATE_SPAN = 5;             // 8..12 enemies in a wave
+  var GATE_WARN = 1.0;
+
   var st = null;                              // whole module state; rebuilt per level
   var nextId = 1;
 
@@ -50,7 +89,8 @@
     return {
       runners: [], snipers: [], turrets: [], spawners: [],
       capsules: [], pickups: [], ebullets: [], grenades: [], boss: null,
-      drones: [], hawk: null
+      drones: [], hawk: null,
+      beacons: [], gates: [], portal: null, camLock: false
     };
   }
 
@@ -127,10 +167,33 @@
     if (!b) { b = {}; eb.push(b); }
     b.alive = true; b.x = x; b.y = y; b.vx = vx; b.vy = vy; b.r = 2; b.ttl = 180; b.src = src;
     b.x1 = x; b.y1 = y; b.x2 = x; b.y2 = y; b.x3 = x; b.y3 = y;
+    /* a recycled slot may have been a missile last life — clear it, or a Tau pod
+       would leak its homing onto every plain shot that lands in that slot after */
+    b.home = 0;
+    return b;
   }
   function fireAt(x, y, tx, ty, speed, src) {
     var dx = tx - x, dy = ty - y, d = Math.sqrt(dx * dx + dy * dy) || 1;
     fire(x, y, dx / d * speed, dy / d * speed, src);
+  }
+  // The Tau's shoulder pods launch these. Same bend the player's missiles get
+  // (MISSILE_TURN a tick, speed kept), pointed the other way — at a player, not
+  // at a hostile. A curve you can outrun, not a snap you cannot.
+  function steerEnemyMissiles(W, DT) {
+    var eb = st.ebullets;
+    for (var i = 0; i < eb.length; i++) {
+      var b = eb[i]; if (!b.alive || !b.home) continue;
+      var t = nearestPlayer(W, b.x, b.y); if (!t) continue;
+      var sp = Math.sqrt(b.vx * b.vx + b.vy * b.vy) || 1;
+      var cur = Math.atan2(b.vy, b.vx);
+      var want = Math.atan2((t.y + t.h / 2) - b.y, (t.x + t.w / 2) - b.x);
+      var d = want - cur;
+      while (d > Math.PI) d -= 2 * Math.PI;
+      while (d < -Math.PI) d += 2 * Math.PI;
+      if (d > MISSILE_TURN) d = MISSILE_TURN; else if (d < -MISSILE_TURN) d = -MISSILE_TURN;
+      var a = cur + d;
+      b.vx = Math.cos(a) * sp; b.vy = Math.sin(a) * sp;
+    }
   }
   function stepBullets(W, DT) {
     var eb = st.ebullets;
@@ -160,6 +223,10 @@
     if (!r) { r = {}; rs.push(r); }
     r.id = nextId++; r.alive = true; r.x = x; r.y = y; r.w = 10; r.h = 14;
     r.vx = 0; r.vy = 0; r.dir = -1; r.onGround = false; r.t = 0; r.jumpCd = 0; r.sp = fromSpawner;
+    /* a recycled slot remembers who it used to work for. Clear every allegiance
+       here, or a plain spawner runner inherits a dead gate's tag and that gate
+       never reads as clear. */
+    r.gate = -1; r.boss = false; r.cult = false;
     return r;
   }
   function stepRunners(W, DT) {
@@ -335,6 +402,7 @@
           k.alive = false;
           if (k.kind === 'b') { p.shieldT = 5; }
           else if (k.kind === 'h') { p.weapon = 'h'; p.hAmmo = 30; }
+          else if (k.kind === 'f') { p.weapon = 'f'; p.fuel = FLAME_FUEL; }
           else if (k.kind === 'd') { spawnDrone(W, p); }
           else if (k.kind === 't') { startHawk(W, p); }
           else { p.weapon = k.kind; }
@@ -346,12 +414,16 @@
     }
   }
   function pickColor(kind) {
-    return kind === 'l' ? '#7FD2F0' : kind === 'b' ? '#6EE7F0' : kind === 'h' ? RED : kind === 'd' ? BONE : kind === 't' ? GOLD : WARM;
+    return kind === 'l' ? '#7FD2F0' : kind === 'b' ? '#6EE7F0' : kind === 'h' ? RED :
+           kind === 'd' ? BONE : kind === 't' ? GOLD : kind === 'f' ? FIRE : WARM;
   }
-  // Capsule odds. T is the rare one (5%); S/L/B keep the lion's share.
+  // Capsule odds. T is still the rare one (5%); F takes its 13% out of the
+  // shield/laser share rather than off the top, so nothing else got rarer than
+  // the day it was tuned except by that much.
   function dropPickup(W, x, y) {
     var roll = W.rng();
-    var kind = roll < 0.05 ? 't' : roll < 0.17 ? 'd' : roll < 0.32 ? 'h' : roll < 0.57 ? 'b' : roll < 0.75 ? 'l' : 's';
+    var kind = roll < 0.05 ? 't' : roll < 0.17 ? 'd' : roll < 0.31 ? 'h' :
+               roll < 0.44 ? 'f' : roll < 0.65 ? 'b' : roll < 0.81 ? 'l' : 's';
     var ps = st.pickups, k = null;
     for (var i = 0; i < ps.length; i++) if (!ps[i].alive) { k = ps[i]; break; }
     if (!k) { k = {}; ps.push(k); }
@@ -369,9 +441,11 @@
     for (i = 0; i < st.capsules.length; i++) { o = st.capsules[i]; if (o.state === 1) fn(o.x, o.y, o, 'c'); }
     var wk = W.enemies;
     if (wk) for (i = 0; i < wk.length; i++) { o = wk[i]; if (o.alive) fn(o.x + o.w / 2, o.y + o.h / 2, o, 'w'); }
+    var PT = st.portal;
+    if (PT && PT.alive) fn(PT.x, PT.y, PT, 'o');
     var B = st.boss;
     if (B && B.alive && B.engaged) {
-      for (i = 0; i < 3; i++) { o = B.ports[i]; if (o.alive) fn(o.x, o.y, o, 'p'); }
+      if (B.ports) for (i = 0; i < 3; i++) { o = B.ports[i]; if (o.alive) fn(o.x, o.y, o, 'p'); }
       fn(B.cx, B.cy, B, 'B');
     }
   }
@@ -398,6 +472,8 @@
     } else if (k === 'p') {
       o.hp -= 1; o.flash = 0.1; W.J('sfx', 'bossHit');
       if (o.hp <= 0) { o.alive = false; W.score(1000, owner); W.J('burst', o.x, o.y, RED, 20); W.J('sfx', 'enemyDie'); W.J('shake', 0.4); }
+    } else if (k === 'o') {
+      damagePortal(W, o, 1, owner);
     } else if (k === 'B') {
       if (!o.open) { W.J('sfx', 'turretHit'); return; }
       damageBossCore(W, o, 1, owner);
@@ -502,6 +578,7 @@
       // one bomb is more than a hit point; a turret's shield is no answer to it
       if (k.kind === 't') { k.o.open = true; k.o.hp = 1; }
       if (k.kind === 'p') k.o.hp = 1;
+      if (k.kind === 'o') k.o.hp = 1;          /* a warp portal is not proof against a bomb run */
       chip(W, k, owner);                       // score / burst / sfx stay in one place
     }
     var B = st.boss;
@@ -514,7 +591,29 @@
   }
 
   // ---------- boss ----------
+  // Four bosses, one per stage, one entry point. Everything they share lives in
+  // stepBoss (engagement, the flash timer, the arena the camera pins them to);
+  // everything that makes them different lives in their own step below. `B.open`
+  // is the one flag the damage code reads, so "where is the weak point open" is
+  // the only thing a boss has to answer to be shootable — no boss-kind branches
+  // in bulletVsEnemies, explode() or the Thunderhawk.
   var BOSS_PERIOD = 4.0, BOSS_OPEN = 1.5, BOSS_OPEN_LONG = 2.6;
+
+  // The arena is measured off the shared camera, never off `view`: cam is sim
+  // state every peer computes identically, view is one browser's opinion.
+  // It is bounded VERTICALLY too, and that is not decoration. Level 3's boss
+  // floor sits at world y 128 on a map only 18 tiles tall, so a flyer picking a
+  // height off `base` alone can hover at y -2: above the ceiling, off the top of
+  // the screen, unhittable and unseen. The ceiling is the camera, and the floor
+  // is whichever comes first, the bottom of the view or the ground itself.
+  function arena(W, B) {
+    var camX = W.camX(), camY = (W.cam ? W.cam.y : 0);
+    B.aL = camX + 30; B.aR = camX + W.VW - 30;
+    B.aT = camY + 34;
+    B.aB = Math.min(camY + W.VH - 40, B.base - 28);
+    if (B.aB < B.aT) B.aB = B.aT;
+  }
+
   function stepBoss(W, DT) {
     var B = st.boss; if (!B || !B.alive) return;
     var camX = W.camX();
@@ -522,10 +621,33 @@
       if (camX + W.VW > B.x - 60) { B.engaged = true; B.t = 0; }
       else return;
     }
-    B.t += DT;
+    B.t += DT; B.modeT += DT;
     if (B.flash > 0) B.flash -= DT;
-    var portsLeft = 0;
-    for (var i = 0; i < 3; i++) if (B.ports[i].alive) portsLeft++;
+    arena(W, B);
+    if (B.kind === K_DREAD) stepDread(W, DT, B);
+    else if (B.kind === K_WARBOSS) stepWarboss(W, DT, B);
+    else if (B.kind === K_TAU) stepTau(W, DT, B);
+    else stepSorcerer(W, DT, B);
+  }
+
+  function bossMode(B, m) { B.mode = m; B.modeT = 0; }
+
+  // Contact damage for the bosses that move into you. Same shape every hittable
+  // player check uses, so a shield or an i-frame reads the same here as anywhere.
+  function bossTouch(W, B, x, y, w, h) {
+    for (var i = 0; i < W.players.length; i++) {
+      var p = W.players[i];
+      if (!hittable(p)) continue;
+      if (rectsOverlap(x, y, w, h, p.x, p.y, p.w, p.h)) W.hurt(p);
+    }
+  }
+
+  // ---------- stage 1: Chaos Dreadnought ----------
+  // Unchanged from the version that shipped: stomps in place, opens its chest on
+  // a fixed 4s clock, three gun ports that die separately and lengthen the window.
+  function stepDread(W, DT, B) {
+    var portsLeft = 0, i;
+    for (i = 0; i < 3; i++) if (B.ports[i].alive) portsLeft++;
     var openWin = portsLeft === 0 ? BOSS_OPEN_LONG : BOSS_OPEN;
     var ph = B.t % BOSS_PERIOD;
     B.open = ph >= BOSS_PERIOD - openWin;
@@ -546,6 +668,351 @@
         } else P.cd = 0.5;
       }
     }
+  }
+
+  // ---------- stage 2: Ork Warboss ----------
+  // idle (throwing boyz at you) -> charge -> hit the wall -> stunned. The head is
+  // the weak point and it is only open in the stun, so the adds are not a side
+  // dish: they are what you have to survive while you wait for the window.
+  function stepWarboss(W, DT, B) {
+    /* Upright his head is 84px up — five tiles, unreachable without standing under
+       a boss who is actively charging you. Stunned he is doubled over, so it comes
+       down to 48 and a grounded shot can land. The pose the art already draws and
+       the only window the fight gives you are the same moment; the hitbox follows
+       the picture instead of arguing with it. */
+    B.cy = B.base - (B.mode === 2 ? 48 : 84);
+    var tgt = nearestPlayer(W, B.cx, B.base - 40);
+    if (B.mode === 0) {                        // idle: face the player, lob runners
+      B.open = false;
+      if (tgt) B.face = (tgt.x + tgt.w / 2) < B.cx ? -1 : 1;
+      B.throwCd -= DT;
+      if (B.throwCd <= 0) {
+        B.throwCd = WB_THROW;
+        var live = 0;
+        for (var i = 0; i < st.runners.length; i++) if (st.runners[i].alive && st.runners[i].boss) live++;
+        if (live < WB_ADDS) {
+          var r = spawnRunner(B.cx - B.face * 14, B.base - 30, -1);
+          r.boss = true; r.vy = -260; r.dir = B.face;
+          W.J('sfx', 'stomp'); W.J('burst', r.x, r.y, ORK, 8);
+        }
+      }
+      if (B.modeT >= WB_IDLE) { bossMode(B, 1); W.J('sfx', 'bossHit'); W.J('shake', 0.3); }
+    } else if (B.mode === 1) {                 // charge: no safe distance
+      B.open = false;
+      B.cx += B.face * WB_SPEED * DT;
+      var wall = B.cx <= B.aL || B.cx >= B.aR ||
+                 W.solidAt(Math.floor((B.cx + B.face * 20) / TS), Math.floor((B.base - 20) / TS));
+      if (wall) {
+        B.cx = Math.max(B.aL, Math.min(B.aR, B.cx));
+        bossMode(B, 2);
+        W.J('sfx', 'bossDie'); W.J('shake', 0.8); W.J('burst', B.cx, B.base - 8, '#8B96C8', 22);
+      }
+    } else {                                   // stunned: the only window there is
+      B.open = true;
+      B.openK = Math.min(1, B.modeT / 0.25);
+      if (B.modeT >= WB_STUN) { bossMode(B, 0); B.throwCd = 0; B.open = false; }
+    }
+    bossTouch(W, B, B.cx - 18, B.base - 96, 36, 96);
+  }
+
+  // ---------- stage 3: Tau Commander ----------
+  // Flies, so the fight is fought upward: aim-up or lose. Always hittable in the
+  // air — the gate is the shield, which it drops into every 20% of its bar.
+  function stepTau(W, DT, B) {
+    var camX = W.camX(), tgt = nearestPlayer(W, B.cx, B.cy);
+    if (B.mode !== 3 && B.hp <= B.shieldAt) {  // 20% gone: land and recharge
+      bossMode(B, 3);
+      B.shieldAt -= Math.ceil(B.hpMax * TAU_STEP);
+      W.J('sfx', 'pickup'); W.J('burst', B.cx, B.cy, TAU_BLUE, 24);
+    }
+    if (B.mode === 3) {                        // shield: grounded, absorbs everything
+      B.open = false;
+      B.cy += ((B.base - 56) - B.cy) * 0.18;
+      if (B.modeT >= TAU_SHIELD) { bossMode(B, 0); B.hoverT = 0; }
+      return;
+    }
+    B.open = true;                             // airborne = hittable, no gating
+    B.cx += (B.tx - B.cx) * 0.055;
+    B.cy += (B.ty - B.cy) * 0.055;
+    if (B.mode === 0) {                        // hover / reposition
+      if (B.modeT >= TAU_HOVER) bossMode(B, B.next === 0 ? 1 : 2);
+    } else if (B.mode === 1) {                 // burst cannon, three shots down-spread
+      B.fireCd -= DT;
+      if (B.fireCd <= 0 && B.shots < 3) {
+        var aim = tgt ? Math.atan2((tgt.y + tgt.h / 2) - B.cy, (tgt.x + tgt.w / 2) - B.cx) : Math.PI / 2;
+        var a = aim + (B.shots - 1) * 0.26;
+        fire(B.cx, B.cy + 10, Math.cos(a) * 175, Math.sin(a) * 175, 'b');
+        B.shots++; B.fireCd = TAU_BURST; B.flash = 0.08;
+        W.J('sfx', 'shoot');
+      }
+      if (B.shots >= 3) { B.shots = 0; B.fireCd = 0; B.next = 1; reposTau(W, B); }
+    } else {                                   // shoulder pods: two homing missiles
+      if (B.shots < TAU_MISSILES) {
+        B.fireCd -= DT;
+        if (B.fireCd <= 0) {
+          var side = B.shots ? 1 : -1;
+          var m = fire(B.cx + side * 14, B.cy - 6, side * 60, 90, 'm');
+          if (m) m.home = 1;
+          B.shots++; B.fireCd = 0.35;
+          W.J('sfx', 'laser');
+        }
+      } else { B.shots = 0; B.fireCd = 0; B.next = 0; reposTau(W, B); }
+    }
+  }
+  function reposTau(W, B) {
+    bossMode(B, 0);
+    B.tx = B.aL + W.rng() * (B.aR - B.aL);
+    B.ty = B.aT + W.rng() * (B.aB - B.aT);
+  }
+
+  // ---------- stage 4: Chaos Sorcerer ----------
+  // Telegraph, strike, blink, repeat — and a portal that keeps paying out cultists
+  // until someone spends the damage on it instead of on the boss. That choice is
+  // the fight.
+  function stepSorcerer(W, DT, B) {
+    stepPortal(W, DT, B);
+    if (B.mode === 0) {                        // cast: 2s of telegraph, then the bolt
+      B.open = true; B.alpha = 1;
+      if (B.modeT < SORC_TELE) {
+        var tgt = nearestPlayer(W, B.cx, B.cy);
+        if (tgt && !B.boltLock) {               // the line is locked when the cast starts
+          B.boltX = tgt.x + tgt.w / 2; B.boltY = tgt.y + tgt.h / 2; B.boltLock = 1;
+        }
+      } else if (B.boltT <= 0 && !B.struck) {
+        B.struck = 1; B.boltT = 0.22;
+        strikeBolt(W, B);
+      }
+      if (B.boltT > 0) B.boltT -= DT;
+      if (B.modeT >= SORC_TELE + SORC_RECOVER) { bossMode(B, 1); B.open = false; }
+    } else {                                   // blink: half a second of untouchable
+      B.open = false;
+      B.alpha = 0.45;
+      if (B.modeT >= SORC_BLINK) {
+        B.cx = B.aL + W.rng() * (B.aR - B.aL);
+        B.cy = B.aT + W.rng() * (B.aB - B.aT);
+        bossMode(B, 0);
+        B.boltLock = 0; B.struck = 0; B.alpha = 1;
+        W.J('burst', B.cx, B.cy, WARP, 20); W.J('sfx', 'pickup');
+      }
+    }
+  }
+  // Warp lightning: a straight line from the sorcerer to where you WERE two
+  // seconds ago. Everything within BOLT_DMG_R of that segment burns, so the
+  // answer is always "be somewhere else by now".
+  function strikeBolt(W, B) {
+    var x1 = B.cx, y1 = B.cy, x2 = B.boltX, y2 = B.boltY;
+    var dx = x2 - x1, dy = y2 - y1, L2 = dx * dx + dy * dy || 1;
+    for (var i = 0; i < W.players.length; i++) {
+      var p = W.players[i];
+      if (!hittable(p)) continue;
+      var px = p.x + p.w / 2 - x1, py = p.y + p.h / 2 - y1;
+      var t = Math.max(0, Math.min(1, (px * dx + py * dy) / L2));
+      var ox = px - dx * t, oy = py - dy * t;
+      if (ox * ox + oy * oy <= BOLT_DMG_R * BOLT_DMG_R) W.hurt(p);
+    }
+    W.J('burst', x2, y2, WARP, 22); W.J('sfx', 'laser'); W.J('shake', 0.45);
+    if (W.flash) W.flash(0.4, WARP);
+  }
+  function stepPortal(W, DT, B) {
+    var P = st.portal;
+    if (!P || !P.alive) {
+      B.portalCd -= DT;
+      if (B.portalCd <= 0) {
+        B.portalCd = SORC_PORTAL_CD;
+        st.portal = { id: nextId++, alive: true, hp: SORC_PORTAL_HP, hpMax: SORC_PORTAL_HP,
+          x: B.aL + 40 + W.rng() * Math.max(1, (B.aR - B.aL) - 80), y: B.base - 34,
+          t: 0, left: 3 + (W.rng() < 0.5 ? 0 : 1), cd: 0.6, flash: 0 };
+        W.J('sfx', 'bossHit'); W.J('burst', st.portal.x, st.portal.y, WARP, 26);
+      }
+      return;
+    }
+    P.t += DT;
+    if (P.flash > 0) P.flash -= DT;
+    P.cd -= DT;
+    if (P.cd <= 0 && P.left > 0) {
+      P.left--;
+      P.cd = SORC_PORTAL_SPAWN / 4;
+      var r = spawnRunner(P.x - 5, P.y - 8, -1);
+      r.cult = true; r.vy = -140;
+      W.J('burst', P.x, P.y, WARP, 12); W.J('sfx', 'enemyDie');
+    }
+    if (P.left <= 0 && P.t > SORC_PORTAL_SPAWN + 1) { P.alive = false; }
+  }
+
+
+  // ---------- flamethrower ----------
+  // Not a gun and not a projectile: a cone test on a 3-tick clock, so it never
+  // touches the pool and never competes with a shot for a slot. One damage a tick
+  // is nothing to a boss and everything to a room full of runners — which is the
+  // whole trade. Fuel burns only while the trigger is down; the bar IS the clock.
+  function flameOrigin(p) {
+    var ax = p.aimX, ay = p.aimY;
+    if (ax === 0 && ay === 0) ax = p.face;
+    var L = Math.sqrt(ax * ax + ay * ay) || 1;
+    return { x: p.x + p.w / 2, y: p.y + (p.prone ? p.h * 0.5 : p.h * 0.4), nx: ax / L, ny: ay / L };
+  }
+  function inCone(o, tx, ty) {
+    var dx = tx - o.x, dy = ty - o.y, d = Math.sqrt(dx * dx + dy * dy);
+    if (d > FLAME_LEN || d < 0.001) return d <= FLAME_LEN;
+    return (dx * o.nx + dy * o.ny) / d >= FLAME_COS;
+  }
+  function stepFlames(W, DT) {
+    var burn = (W.tick % FLAME_TICKS) === 0;
+    for (var i = 0; i < W.players.length; i++) {
+      var p = W.players[i];
+      if (!p.alive || p.dead || p.weapon !== 'f') continue;
+      if (!p.inp || !p.inp.f) continue;
+      p.fuel -= DT;
+      if (p.fuel <= 0) {                       // out of fuel: the normal gun comes back
+        p.fuel = 0; p.weapon = 'n';
+        W.J('sfx', 'turretHit');
+        continue;
+      }
+      if (!burn) continue;
+      var o = flameOrigin(p), hits = [];
+      eachTarget(W, function (tx, ty, obj, kind) {
+        if (inCone(o, tx, ty)) hits.push({ x: tx, y: ty, o: obj, kind: kind });
+      });
+      for (var h = 0; h < hits.length; h++) chip(W, hits[h], p);   // area, not single-target
+      if (hits.length) W.J('sfx', 'turretHit');
+    }
+  }
+
+  // ---------- co-op revive ----------
+  // Called by the core the moment a player dies with someone else still standing.
+  // The beacon is where they fell, not where the run has got to — the camera only
+  // ever advances, so saving a teammate means giving up ground. That cost is the
+  // mechanic; without it a revive is just a free respawn with extra steps.
+  // x/y come from the core, which knows where the floor is — a beacon has to be
+  // somewhere a teammate can STAND, and the commonest death here is a long drop.
+  function dropBeacon(W, p, x, y) {
+    if (!st) return null;
+    var bs = st.beacons, b = null;
+    for (var i = 0; i < bs.length; i++) if (!bs[i].alive) { b = bs[i]; break; }
+    if (!b) { b = {}; bs.push(b); }
+    b.alive = true; b.slot = p.slot;
+    b.x = (x === undefined ? p.x + p.w / 2 : x);
+    b.y = (y === undefined ? p.y + p.h / 2 : y);
+    b.t = BEACON_LIFE; b.prog = 0; b.helpers = 0;
+    p.beaconT = BEACON_LIFE;
+    W.J('burst', b.x, b.y, GOLD, 16); W.J('sfx', 'coin');
+    return b;
+  }
+  function stepBeacons(W, DT) {
+    var camX = W.camX();
+    for (var i = 0; i < st.beacons.length; i++) {
+      var b = st.beacons[i]; if (!b.alive) continue;
+      var p = W.players[b.slot];
+      if (!p || !p.dead || !p.alive) { b.alive = false; continue; }
+      b.t -= DT;
+      /* left behind: the screen has moved on, so the body has. Expiring here (not
+         just at 15s) is what stops a beacon quietly holding a player dead off-screen
+         while the core waits for a revive that can never happen. */
+      if (b.t <= 0 || b.x < camX - 8) {
+        b.alive = false; p.beaconT = 0;
+        W.J('burst', b.x, b.y, '#5A6080', 10);
+        continue;
+      }
+      /* Nobody left standing means nobody is coming. Without this, a wipe holds
+         EVERY player dead behind a beacon only another living player could clear:
+         the game stops for fifteen seconds with no way to act and no way to lose,
+         and calls it a mechanic. A beacon is a rescue, so it needs a rescuer —
+         with none, fall straight through to the ordinary respawn. */
+      var n = 0, rescuers = 0;
+      for (var j = 0; j < W.players.length; j++) {
+        var q = W.players[j];
+        if (q === p || !q.alive || q.dead) continue;
+        rescuers++;
+        var dx = (q.x + q.w / 2) - b.x, dy = (q.y + q.h / 2) - b.y;
+        if (dx * dx + dy * dy <= BEACON_R * BEACON_R) n++;
+      }
+      if (!rescuers) {
+        b.alive = false; p.beaconT = 0;
+        W.J('burst', b.x, b.y, '#5A6080', 8);
+        continue;
+      }
+      p.beaconT = b.t;
+      b.helpers = n;
+      /* Hold it, do not bank it: step back out of the circle and the bar drains at
+         the same rate it filled. A revive should cost a teammate three seconds of
+         standing still in a firefight, not three seconds collected over a minute. */
+      b.prog += (n > 0 ? DT : -DT);
+      if (b.prog < 0) b.prog = 0;
+      if (b.prog >= BEACON_HOLD) {
+        b.alive = false; p.beaconT = 0;
+        W.revive(p, b.x, b.y, REVIVE_INV);
+        W.J('burst', b.x, b.y, GOLD, 30); W.J('sfx', 'start'); W.J('shake', 0.3);
+        if (W.flash) W.flash(0.35, GOLD);
+      }
+    }
+  }
+
+  // ---------- mini-boss gates ----------
+  // The camera stops, a wave lands, and the run does not continue until the room
+  // is clear. One per stage; stage four has none, because there the boss is it.
+  function stepGates(W, DT) {
+    st.camLock = false;
+    for (var i = 0; i < st.gates.length; i++) {
+      var G = st.gates[i];
+      if (G.state === 3) continue;
+      if (G.state === 0) {
+        if (!leadPast(W, G.x)) continue;
+        G.state = 1; G.t = GATE_WARN;
+        W.banner('W A R N I N G', GATE_WARN);
+        W.J('sfx', 'hurt'); W.J('shake', 0.5);
+        if (W.flash) W.flash(0.4, RED);
+      }
+      st.camLock = true;                       // held from the warning to the last kill
+      if (G.state === 1) {
+        G.t -= DT;
+        if (G.t <= 0) { G.state = 2; spawnWave(W, G, i); }
+        continue;
+      }
+      var live = 0, j;
+      for (j = 0; j < st.runners.length; j++) if (st.runners[j].alive && st.runners[j].gate === i) live++;
+      for (j = 0; j < st.snipers.length; j++) if (st.snipers[j].alive && st.snipers[j].gate === i) live++;
+      if (live === 0) {
+        G.state = 3; st.camLock = false;
+        W.banner('CLEAR', 1.2);
+        W.J('sfx', 'goal'); W.score(1500, null);
+      }
+    }
+  }
+  function leadPast(W, x) {
+    for (var i = 0; i < W.players.length; i++) {
+      var p = W.players[i];
+      if (!p.alive || p.dead) continue;
+      if (p.x + p.w / 2 >= x) return true;
+    }
+    return false;
+  }
+  // Themed off the stage the gate stands in: orks and cultists in the jungle, all
+  // orks on the ork stage, Tau marksmen and cultists in the Tau corridor.
+  function spawnWave(W, G, idx) {
+    var n = GATE_MIN + Math.floor(W.rng() * GATE_SPAN);
+    G.n = n;                                   /* what LANDED, for the tests */
+    var camX = W.camX(), left = camX - 20, right = camX + W.VW + 20;
+    for (var k = 0; k < n; k++) {
+      var fromLeft = W.rng() < 0.5;
+      var x = fromLeft ? left - (k % 4) * 22 : right + (k % 4) * 22;
+      if (G.stage === 2 && (k % 3) === 0) {    // Tau corridor: marksmen on the deck
+        var tx = Math.floor((camX + 40 + W.rng() * (W.VW - 80)) / TS);
+        var fy = floorBelow(W, tx, 1);
+        st.snipers.push({ id: nextId++, alive: true, x: tx * TS + 3, y: fy - 14, w: 10, h: 14,
+          face: -1, cd: 0.9 + W.rng() * 0.7, t: 0, flash: 0, gate: idx });
+        continue;
+      }
+      /* on the floor beneath the SPAWN column, not the gate's floor: the screen
+         edge is 200px from the gate and the ground under it is often somewhere
+         else entirely. Spawning at the gate's height dropped a third of every
+         wave straight into a pit before the player ever saw it. */
+      var gy = floorBelow(W, Math.floor(x / TS), 1);
+      var r = spawnRunner(x, gy - 20, -1);
+      r.gate = idx;
+      r.cult = (G.stage !== 1) && ((k % 3) === 1);   // ork stage is orks, full stop
+      r.dir = fromLeft ? 1 : -1;
+    }
+    W.J('sfx', 'bossHit'); W.J('shake', 0.4);
   }
 
   // ---------- player bullets vs everything of ours ----------
@@ -606,10 +1073,20 @@
       }
       if (!b.alive) continue;
 
+      /* The warp portal. A live target like any other, and deliberately fat and
+         low: it should be easy to HIT and expensive to CHOOSE. */
+      var PT = st.portal;
+      if (PT && PT.alive && circleRect(b.x, b.y, b.r, PT.x - 12, PT.y - 18, 24, 34) &&
+          bulletHitOnce(b, PT.id)) {
+        damagePortal(W, PT, bulletDmg(b.kind), owner);
+        if (b.kind !== 'l') { b.alive = false; continue; }
+      }
+      if (!b.alive) continue;
+
       var B = st.boss;
       if (B && B.alive && B.engaged) {
         var hitAny = false;
-        for (j = 0; j < 3; j++) {
+        for (j = 0; B.ports && j < B.ports.length; j++) {
           var P = B.ports[j]; if (!P.alive) continue;
           if (!circleRect(b.x, b.y, b.r, P.x - 7, P.y - 7, 14, 14)) continue;
           if (!bulletHitOnce(b, P.id)) continue;
@@ -622,7 +1099,8 @@
           if (b.kind !== 'l') break;
         }
         if (!b.alive) continue;
-        if (circleRect(b.x, b.y, b.r, B.cx - 9, B.cy - 9, 18, 18)) {
+        var wr = B.wr || 9;
+        if (circleRect(b.x, b.y, b.r, B.cx - wr, B.cy - wr, wr * 2, wr * 2)) {
           if (!B.open) {
             if (b.kind !== 'l') { b.alive = false; W.J('burst', b.x, b.y, STEEL_HI, 3); W.J('sfx', 'turretHit'); }
             continue;
@@ -632,7 +1110,7 @@
           W.J('sfx', 'bossHit'); W.J('burst', b.x, b.y, WARM, 6);
           if (B.hp <= 0) {
             B.alive = false; B.hp = 0; W.levelDone = true; W.score(5000, owner);
-            for (var q = 0; q < 3; q++) { B.ports[q].alive = false; }
+            for (var q = 0; B.ports && q < B.ports.length; q++) B.ports[q].alive = false;
             for (q = 0; q < st.ebullets.length; q++) st.ebullets[q].alive = false;
             W.J('burst', B.cx, B.cy, WARM, 60); W.J('burst', B.cx, B.cy, RED, 40);
             W.J('sfx', 'bossDie'); W.J('shake', 1); W.J('hitstop', 6);
@@ -664,12 +1142,23 @@
     return dx * dx + dy * dy <= BLAST * BLAST;
   }
 
-  function damageBossCore(W, B, n, owner) {
-    B.hp -= n; B.flash = 0.12;
+  // The portal takes damage like anything else, but killing it is a CHOICE: every
+  // point spent here is a point not spent on the sorcerer. That is the whole fight.
+  function damagePortal(W, P, n, owner) {
+    if (!P || !P.alive) return;
+    P.hp -= n; P.flash = 0.1;
+    W.J('sfx', 'turretHit'); W.J('burst', P.x, P.y, WARP, 4);
+    if (P.hp <= 0) {
+      P.alive = false; P.left = 0; W.score(2000, owner);
+      W.J('burst', P.x, P.y, WARP, 30); W.J('sfx', 'bossDie'); W.J('shake', 0.5);
+    }
+  }
+
+  function damageBossCore(W, B, n, owner) {    B.hp -= n; B.flash = 0.12;
     W.J('sfx', 'bossHit');
     if (B.hp <= 0) {
       B.alive = false; B.hp = 0; W.levelDone = true; W.score(5000, owner);
-      for (var q = 0; q < 3; q++) B.ports[q].alive = false;
+      for (var q = 0; B.ports && q < B.ports.length; q++) B.ports[q].alive = false;
       for (q = 0; q < st.ebullets.length; q++) st.ebullets[q].alive = false;
       W.J('burst', B.cx, B.cy, WARM, 60); W.J('burst', B.cx, B.cy, RED, 40);
       W.J('sfx', 'bossDie'); W.J('shake', 1); W.J('hitstop', 6);
@@ -727,7 +1216,7 @@
     }
     var B = st.boss;
     if (B && B.alive && B.engaged) {
-      for (i = 0; i < 3; i++) {
+      for (i = 0; B.ports && i < B.ports.length; i++) {
         var P = B.ports[i]; if (!P.alive) continue;
         if (!within(x, y, P.x, P.y)) continue;
         P.hp -= BLAST_DMG; P.flash = 0.1;
@@ -739,6 +1228,10 @@
       }
       // The shell only takes damage while it is open — same rule the bullets obey.
       if (B.alive && B.open && within(x, y, B.cx, B.cy)) damageBossCore(W, B, BLAST_DMG, owner);
+      /* and the portal, which a bomb is a perfectly good answer to */
+      if (st.portal && st.portal.alive && within(x, y, st.portal.x, st.portal.y)) {
+        damagePortal(W, st.portal, BLAST_DMG, owner);
+      }
     }
   }
 
@@ -801,26 +1294,75 @@
         } else if (ch === 'W') {
           st.capsules.push({ id: nextId++, state: 0, ax: px + TS / 2, ay: py + TS / 2, x: 0, y: 0, vx: 0, t: 0, alive: false });
         } else if (ch === 'B') {
-          var face = W.solidAt(x + 1, y) || W.solidAt(x + 2, y) ? -1 : 1;     // face away from the wall behind
-          var base = floorBelow(W, x, y);
-          var cx = px + TS / 2, cy = base - 46;
-          st.boss = { id: nextId++, alive: true, engaged: false, x: cx, cx: cx, cy: cy, base: base, face: face,
-            hp: 30, hpMax: 30, open: false, openK: 0, t: 0, flash: 0,
-            ports: [
-              { id: nextId++, alive: true, hp: 6, x: cx + face * 22, y: base - 12, cd: 1.0, burst: 0, flash: 0 },
-              { id: nextId++, alive: true, hp: 6, x: cx + face * 24, y: base - 80, cd: 1.7, burst: 0, flash: 0 },
-              { id: nextId++, alive: true, hp: 6, x: cx - face * 2, y: base - 104, cd: 2.4, burst: 0, flash: 0 }
-            ] };
+          st.boss = makeBoss(W, x, y, px);
         }
       }
     }
+    buildGates(W);
     W.levelDone = false;
+  }
+
+  // The core owns the level table, so the core says which boss this level fights;
+  // CONTRA owns what each of them does. Demanded, never defaulted: a missing kind
+  // would silently hand every stage the same Dreadnought back, which is the exact
+  // bug this whole pass exists to kill.
+  function makeBoss(W, x, y, px) {
+    var kind = W.bossKind;
+    if (kind !== 0 && kind !== 1 && kind !== 2 && kind !== 3) {
+      throw new Error('CONTRA.build: W.bossKind must be 0..3, got ' + kind +
+                      ' — the core has to name which boss this level fights');
+    }
+    var face = W.solidAt(x + 1, y) || W.solidAt(x + 2, y) ? -1 : 1;   // away from the wall behind
+    var base = floorBelow(W, x, y);
+    var cx = px + TS / 2;
+    var hp = BOSS_HP[kind];
+    var B = { id: nextId++, kind: kind, alive: true, engaged: false,
+      x: cx, cx: cx, cy: base - 46, base: base, face: face,
+      hp: hp, hpMax: hp, open: false, openK: 0, t: 0, modeT: 0, mode: 0, flash: 0,
+      aL: cx - 200, aR: cx + 40, alpha: 1, ports: null };
+    if (kind === K_DREAD) {
+      B.ports = [
+        { id: nextId++, alive: true, hp: 6, x: cx + face * 22, y: base - 12, cd: 1.0, burst: 0, flash: 0 },
+        { id: nextId++, alive: true, hp: 6, x: cx + face * 24, y: base - 80, cd: 1.7, burst: 0, flash: 0 },
+        { id: nextId++, alive: true, hp: 6, x: cx - face * 2, y: base - 104, cd: 2.4, burst: 0, flash: 0 }
+      ];
+    } else if (kind === K_WARBOSS) {
+      B.throwCd = 0; B.cy = base - 84; B.wr = 14;
+    } else if (kind === K_TAU) {
+      B.shots = 0; B.fireCd = 0; B.next = 0; B.hoverT = 0;
+      B.shieldAt = hp - Math.ceil(hp * TAU_STEP);
+      B.cy = base - 60; B.tx = cx; B.ty = base - 60; B.wr = 16;   /* arena() re-homes it on engage */
+    } else {
+      B.boltX = cx; B.boltY = base; B.boltT = 0; B.boltLock = 0; B.struck = 0;
+      B.portalCd = SORC_PORTAL_CD * 0.5;      // the first portal comes early, not at 30s
+      B.cy = base - 70; B.wr = 14;
+    }
+    return B;
+  }
+
+  // Gate columns are GLOBAL — the same count the parallax stages are cut on — so
+  // the core hands over where this level starts in that count and only the gates
+  // that land inside it are armed.
+  function buildGates(W) {
+    var off = W.colOffset;
+    if (typeof off !== 'number') {
+      throw new Error('CONTRA.build: W.colOffset must be this level\'s first global column');
+    }
+    for (var i = 0; i < GATE_COLS.length; i++) {
+      var local = GATE_COLS[i] - off;
+      if (local < 4 || local > W.MAP_W - 6) continue;      // not in this level
+      /* no y: the wave spawns at the screen edges and each runner takes the floor
+         under its own column, so the gate's own floor height is nobody's business */
+      st.gates.push({ col: local, x: local * TS,
+        stage: Math.floor(GATE_COLS[i] / 200), state: 0, t: 0, n: 0 });
+    }
   }
 
   // ---------- step ----------
   function step(W, DT) {
     if (!st) return;
     curW = W;
+    stepGates(W, DT);
     stepSpawners(W, DT);
     stepRunners(W, DT);
     stepSnipers(W, DT);
@@ -830,8 +1372,11 @@
     stepGrenades(W, DT);
     stepBullets(W, DT);
     steerMissiles(W, DT);
+    steerEnemyMissiles(W, DT);
     stepDrones(W, DT);
     stepHawk(W, DT);
+    stepFlames(W, DT);
+    stepBeacons(W, DT);
     bulletVsEnemies(W);
     curW = null;
   }
@@ -873,6 +1418,14 @@
       if (ex < -30 || ex > VW + 30) continue;
       var bob = e.onGround ? Math.abs(Math.sin(e.t * 18)) * 1.5 : 0;
       if (SP) {
+        /* a gate wave and the sorcerer's portal both field cultists — the sheet
+           has been sitting in the build unused since the cast was drawn. One pose,
+           no walk cycle, so they read as a different body at a glance. */
+        if (e.cult && SP.cultist) {
+          blit(SP.cultist, 0, 24, 24, ex + e.w / 2, ey + e.h - 12 + bob * 0.5, e.dir > 0, 0);
+          lights.push([ex + e.w / 2, ey + e.h / 2, 22, WARP, 0.25]);
+          continue;
+        }
         // walk sheet: 4-frame charge cycle, one frame every 6 ticks. Its art faces
         // RIGHT (the old single-pose runner faces left), so the flip is inverted.
         if (SP.runnerWalk && e.onGround) {
@@ -1012,12 +1565,17 @@
       lights.push([px, py, 28, pc, 0.35]);
     }
 
-    // boss: steel bulkhead, three port rings, pulsing warm eye behind an iris
+    // boss: one draw per stage. The Dreadnought keeps the bulkhead-and-iris it
+    // always had; the other three are their own shape below, because a thing that
+    // charges, flies or blinks cannot be drawn as a hole in a wall.
     var B = st.boss;
     if (B && (B.alive || B.flash > 0)) {
       var bx = B.cx - cx, by = B.cy - cy, f = B.face;
       if (bx > -140 && bx < VW + 140) {
         var baseY = B.base - cy;
+        if (B.kind !== K_DREAD) {
+          drawBossKind(g, B, bx, by, baseY, cx, cy, lights, SP, blit, tc);
+        } else {
         if (SP) {
           // Chaos Dreadnought, feet on the floor. Art's gun is on screen-left; flip so
           // it points the way the boss faces. Ports + core stay drawn on top: targets.
@@ -1062,8 +1620,13 @@
           }
           lights.push([bx, by, B.open ? 70 + beat * 12 : 30, WARM, B.open ? 0.6 : 0.25]);
         }
+        }
       }
     }
+
+    drawPortal(g, cx, cy, lights, SP, blit, tc);
+    drawBeacons(g, cx, cy, lights, tc);
+    drawFlames(g, cx, cy, lights, W, tc);
 
     // servo-skulls: bob on a sine, bank frame while the player turns, firing
     // frame held 200ms after a shot, the laser itself a 1px red line for 100ms
@@ -1120,6 +1683,198 @@
     drawGrenades(g, cx, cy, lights);
   }
 
+  // ---------- the three new bosses, drawn ----------
+  // Each one is a 128px three-frame sheet plus the marks the FIGHT needs on top:
+  // a weak point you can see is open, a shield you can see is up, a telegraph you
+  // can read in time. The canvas fallbacks are deliberately crude but carry the
+  // same information, so a build with no sprites is still playable.
+  function bossFrame(B) {
+    if (B.kind === K_WARBOSS) return B.mode;                 // idle / charge / stunned
+    if (B.kind === K_TAU) return B.mode === 3 ? 1 : (B.mode === 1 ? 2 : 0);
+    return st.portal && st.portal.alive ? 2 : (B.mode === 1 ? 1 : 0);
+  }
+  function drawBossKind(g, B, bx, by, baseY, cx, cy, lights, SP, blit, tc) {
+    var fr = bossFrame(B), al = (B.alpha === undefined ? 1 : B.alpha) * (B.alive ? 1 : 0.6);
+    var midY = B.kind === K_WARBOSS ? baseY - 64 : by;
+    var sheet = B.kind === K_WARBOSS ? (SP && SP.bossWarboss)
+              : B.kind === K_TAU ? (SP && SP.bossTau) : (SP && SP.bossSorcerer);
+    if (sheet) {
+      /* every one of these sheets is drawn facing right; flip when he faces left */
+      blit(sheet, fr, 128, 128, bx, midY, B.face < 0, 0, al);
+    } else {
+      g.globalAlpha = al;
+      g.fillStyle = B.kind === K_WARBOSS ? ORK : (B.kind === K_TAU ? TAU_BLUE : WARP_LO);
+      rrect(g, bx - 22, midY - 40, 44, 80, 6); g.fill();
+      g.globalAlpha = 1;
+    }
+    if (B.flash > 0) {
+      g.fillStyle = '#FFFFFF'; g.globalAlpha = 0.32;
+      g.fillRect(bx - 40, midY - 56, 80, 112); g.globalAlpha = 1;
+    }
+
+    if (B.kind === K_WARBOSS) {
+      /* the head. Open only in the stun, and it has to LOOK open — a ring you can
+         see from across the arena, because the window is three seconds long. */
+      var hx = bx, hy = B.cy - cy;
+      if (B.open) {
+        var beat = 0.5 + 0.5 * Math.sin(tc * 10);
+        g.strokeStyle = HOT; g.lineWidth = 2; g.globalAlpha = 0.55 + beat * 0.45;
+        g.beginPath(); g.arc(hx, hy, 11 + beat * 2, 0, 6.283); g.stroke();
+        g.globalAlpha = 1;
+        g.fillStyle = RED; g.beginPath(); g.arc(hx, hy, 3.4, 0, 6.283); g.fill();
+        lights.push([hx, hy, 54, RED, 0.55]);
+        /* stun stars, so "he is down" reads without reading the health bar */
+        for (var k = 0; k < 3; k++) {
+          var a = tc * 4 + k * 2.09;
+          g.fillStyle = WARM; g.globalAlpha = 0.85;
+          g.fillRect(hx + Math.cos(a) * 15 - 1, hy - 16 + Math.sin(a) * 5 - 1, 2.4, 2.4);
+        }
+        g.globalAlpha = 1;
+      } else if (B.mode === 1) {
+        /* charge: speed lines off the back, so the rush reads before it lands */
+        g.strokeStyle = ORK; g.globalAlpha = 0.5; g.lineWidth = 1;
+        for (var q = 0; q < 4; q++) {
+          var ly = baseY - 20 - q * 16;
+          g.beginPath(); g.moveTo(bx - B.face * 24, ly); g.lineTo(bx - B.face * (44 + q * 6), ly); g.stroke();
+        }
+        g.globalAlpha = 1;
+        lights.push([bx, baseY - 40, 60, ORK, 0.3]);
+      }
+    } else if (B.kind === K_TAU) {
+      if (B.mode === 3) {
+        /* shield bubble: nothing gets through, and it must be obvious it does not */
+        var sb = 0.5 + 0.5 * Math.sin(tc * 5);
+        g.strokeStyle = TAU_BLUE; g.lineWidth = 2; g.globalAlpha = 0.7 + sb * 0.3;
+        g.beginPath(); g.arc(bx, midY, 44 + sb * 3, 0, 6.283); g.stroke();
+        g.fillStyle = TAU_BLUE; g.globalAlpha = 0.10 + sb * 0.07;
+        g.beginPath(); g.arc(bx, midY, 44, 0, 6.283); g.fill();
+        g.globalAlpha = 1;
+        lights.push([bx, midY, 90, TAU_BLUE, 0.5]);
+      } else {
+        /* jet wash under the thrusters — the only cue that it is HOLDING altitude */
+        for (var t2 = -1; t2 <= 1; t2 += 2) {
+          var jf = 6 + Math.abs(Math.sin(tc * 18 + t2)) * 5;
+          g.fillStyle = TAU_BLUE; g.globalAlpha = 0.5;
+          g.beginPath(); g.moveTo(bx + t2 * 11 - 3, midY + 26); g.lineTo(bx + t2 * 11 + 3, midY + 26);
+          g.lineTo(bx + t2 * 11, midY + 26 + jf); g.closePath(); g.fill();
+        }
+        g.globalAlpha = 1;
+        lights.push([bx, midY + 30, 40, TAU_BLUE, 0.4]);
+      }
+    } else {
+      /* the sorcerer's telegraph: a thin line to where you WERE, thickening as the
+         two seconds run out. It is the whole tell — draw it so it cannot be missed. */
+      if (B.mode === 0 && B.boltLock && !B.struck) {
+        var k2 = Math.min(1, B.modeT / SORC_TELE);
+        g.strokeStyle = WARP; g.globalAlpha = 0.25 + k2 * 0.6; g.lineWidth = 1 + k2 * 2.5;
+        g.beginPath(); g.moveTo(bx, by); g.lineTo(B.boltX - cx, B.boltY - cy); g.stroke();
+        g.globalAlpha = 1;
+        g.fillStyle = WARP; g.globalAlpha = 0.4 + k2 * 0.6;
+        g.beginPath(); g.arc(B.boltX - cx, B.boltY - cy, 3 + k2 * 5, 0, 6.283); g.fill();
+        g.globalAlpha = 1;
+        lights.push([B.boltX - cx, B.boltY - cy, 30 + k2 * 30, WARP, 0.3 + k2 * 0.4]);
+      }
+      if (B.boltT > 0) {                       // the strike itself, two frames of it
+        g.strokeStyle = '#FFFFFF'; g.lineWidth = 4; g.globalAlpha = 0.9;
+        g.beginPath(); g.moveTo(bx, by); g.lineTo(B.boltX - cx, B.boltY - cy); g.stroke();
+        g.strokeStyle = WARP; g.lineWidth = 8; g.globalAlpha = 0.45;
+        g.beginPath(); g.moveTo(bx, by); g.lineTo(B.boltX - cx, B.boltY - cy); g.stroke();
+        g.globalAlpha = 1;
+        lights.push([B.boltX - cx, B.boltY - cy, 90, WARP, 0.8]);
+      }
+      lights.push([bx, by, 50, WARP, B.open ? 0.45 : 0.2]);
+    }
+    /* the health-bar ring every one of them shares: a thin arc round the weak
+       point, full when open. The HUD says how much is left; this says WHERE. */
+    if (B.alive && B.open) {
+      var wp = 0.5 + 0.5 * Math.sin(tc * 8);
+      g.strokeStyle = HOT; g.globalAlpha = 0.3 + wp * 0.3; g.lineWidth = 1;
+      g.beginPath(); g.arc(bx, by, 15, 0, 6.283); g.stroke();
+      g.globalAlpha = 1;
+    }
+  }
+
+  // The warp portal: a spiral that keeps paying out cultists, with its own little
+  // health bar — the player has to be able to judge "can I afford to close it".
+  function drawPortal(g, cx, cy, lights, SP, blit, tc) {
+    var P = st.portal; if (!P || !P.alive) return;
+    var px = P.x - cx, py = P.y - cy;
+    var spin = tc * 3, pulse = 0.5 + 0.5 * Math.sin(tc * 6);
+    for (var r = 3; r >= 1; r--) {
+      g.strokeStyle = r === 1 ? '#FFFFFF' : WARP;
+      g.globalAlpha = 0.25 + pulse * 0.35;
+      g.lineWidth = 2;
+      g.beginPath();
+      g.arc(px, py, r * 6 + pulse * 2, spin + r, spin + r + 4.2);
+      g.stroke();
+    }
+    g.globalAlpha = 1;
+    g.fillStyle = '#120A1E'; g.beginPath(); g.arc(px, py, 5, 0, 6.283); g.fill();
+    var w = 22, k = Math.max(0, P.hp / P.hpMax);
+    g.fillStyle = 'rgba(0,0,0,.55)'; g.fillRect(px - w / 2 - 1, py - 26, w + 2, 4);
+    g.fillStyle = P.flash > 0 ? '#FFFFFF' : WARP; g.fillRect(px - w / 2, py - 25, w * k, 2);
+    lights.push([px, py, 60 + pulse * 14, WARP, 0.55]);
+  }
+
+  // The revive beacon: a gold Aquila ring where a teammate fell, its progress bar
+  // filling only while somebody is standing in it. The ring shrinks with the
+  // fifteen-second clock, so "hurry" is visible from off-screen.
+  function drawBeacons(g, cx, cy, lights, tc) {
+    for (var i = 0; i < st.beacons.length; i++) {
+      var b = st.beacons[i]; if (!b.alive) continue;
+      var x = b.x - cx, y = b.y - cy;
+      var pulse = 0.5 + 0.5 * Math.sin(tc * (b.helpers ? 12 : 5));
+      var life = b.t / BEACON_LIFE;
+      g.strokeStyle = GOLD; g.globalAlpha = 0.35 + pulse * 0.45; g.lineWidth = 1.5;
+      g.beginPath(); g.arc(x, y, BEACON_R * (0.45 + life * 0.55), 0, 6.283); g.stroke();
+      g.globalAlpha = 0.9;
+      g.beginPath(); g.arc(x, y, 4 + pulse * 1.5, 0, 6.283); g.stroke();
+      g.globalAlpha = 1;
+      /* the Aquila, in two strokes: a downward wedge with wings */
+      g.fillStyle = GOLD;
+      g.beginPath(); g.moveTo(x, y + 4); g.lineTo(x - 5, y - 2); g.lineTo(x + 5, y - 2); g.closePath(); g.fill();
+      var w = 26, k = Math.min(1, b.prog / BEACON_HOLD);
+      g.fillStyle = 'rgba(0,0,0,.6)'; g.fillRect(x - w / 2 - 1, y - 20, w + 2, 5);
+      g.fillStyle = b.helpers ? '#FFF0C4' : GOLD; g.fillRect(x - w / 2, y - 19, w * k, 3);
+      g.font = 'bold 6px monospace'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillStyle = GOLD; g.globalAlpha = 0.85;
+      g.fillText(Math.ceil(b.t) + 's', x, y - 26);
+      g.globalAlpha = 1; g.textAlign = 'left';
+      lights.push([x, y, 46 + pulse * 14, GOLD, 0.45 + pulse * 0.2]);
+    }
+  }
+
+  // The flame cone. Drawn, not simulated — stepFlames already decided who burns.
+  // Three stacked wedges (deep red, orange, hot core) with the tip jittered off
+  // the tick so it flickers without ever asking rng() and desyncing anything.
+  function drawFlames(g, cx, cy, lights, W, tc) {
+    for (var i = 0; i < W.players.length; i++) {
+      var p = W.players[i];
+      if (!p.alive || p.dead || p.weapon !== 'f') continue;
+      if (!p.inp || !p.inp.f || !(p.fuel > 0)) continue;
+      var o = flameOrigin(p), ox = o.x - cx, oy = o.y - cy;
+      var ang = Math.atan2(o.ny, o.nx), half = Math.PI / 6;
+      var lay = [[FLAME_LEN, FIRE_LO, 0.40], [FLAME_LEN * 0.82, FIRE, 0.55], [FLAME_LEN * 0.5, FIRE_HI, 0.75]];
+      for (var L = 0; L < lay.length; L++) {
+        var len = lay[L][0] * (0.9 + ((W.tick + L * 5) % 7) / 35);
+        g.fillStyle = lay[L][1]; g.globalAlpha = lay[L][2];
+        g.beginPath(); g.moveTo(ox, oy);
+        g.arc(ox, oy, len, ang - half, ang + half);
+        g.closePath(); g.fill();
+      }
+      g.globalAlpha = 1;
+      /* embers: deterministic offsets off the tick, never rng() */
+      for (var e = 0; e < 5; e++) {
+        var t2 = ((W.tick * 7 + e * 13) % 40) / 40;
+        var sp = ang + ((e % 3) - 1) * 0.22;
+        g.fillStyle = e % 2 ? FIRE_HI : FIRE; g.globalAlpha = 0.8 - t2 * 0.7;
+        g.fillRect(ox + Math.cos(sp) * FLAME_LEN * t2, oy + Math.sin(sp) * FLAME_LEN * t2, 2, 2);
+      }
+      g.globalAlpha = 1;
+      lights.push([ox + o.nx * 20, oy + o.ny * 20, 70, FIRE, 0.6]);
+    }
+  }
+
   // Grenades: a small orange bead with the same 3-point trail the enemy bullets
   // use, so the arc reads as a thrown thing and not a slow bullet.
   function drawGrenades(g, cx, cy, lights) {
@@ -1144,24 +1899,67 @@
   function hud(W) {
     var B = st && st.boss;
     if (!B || !B.engaged) return '';
-    if (!B.alive) return 'BOSS DOWN';
-    var n = 10, k = Math.ceil(B.hp / B.hpMax * n), s = 'BOSS ';
+    /* Name it. Four bosses that all read "BOSS" is four bosses the player cannot
+       tell apart in the one place they are looking while they fight. */
+    if (!B.alive) return BOSS_NAME[B.kind] + ' DOWN';
+    var n = 10, k = Math.ceil(B.hp / B.hpMax * n), s = BOSS_NAME[B.kind] + ' ';
     for (var i = 0; i < n; i++) s += i < k ? '█' : '░';
+    /* The portal shares this row on purpose: boss or portal is one decision, so
+       it should be one glance. */
+    var P = st.portal;
+    if (P && P.alive) {
+      var pk = Math.ceil(P.hp / P.hpMax * 5);
+      s += '  PORTAL ';
+      for (i = 0; i < 5; i++) s += i < pk ? '█' : '░';
+    }
     return s;
   }
 
   var CONTRA = { build: build, step: step, draw: draw, hud: hud,
     throwGrenade: throwGrenade, stepGrenades: stepGrenades, drawGrenades: drawGrenades,
     poolRoom: poolRoom, poolCount: poolCount, POOL_CAP: POOL_CAP,
+    /* the core owns what a player IS, so it calls this when one dies with a
+       teammate still up; CONTRA owns the beacon from there. */
+    dropBeacon: dropBeacon,
+    camLocked: function () { return !!(st && st.camLock); },
+    FLAME_FUEL: FLAME_FUEL,
     /* harness: the pickup effect without the pickup, for screenshots and tests */
     grant: function (W, slot, kind) {
       var p = W.players[slot]; if (!st || !p) return false;
       if (kind === 'h') { p.weapon = 'h'; p.hAmmo = 30; }
+      else if (kind === 'f') { p.weapon = 'f'; p.fuel = FLAME_FUEL; }
       else if (kind === 'd') spawnDrone(W, p);
       else if (kind === 't') startHawk(W, p);
       else if (kind === 'b') p.shieldT = 5;
       else p.weapon = kind;
       return true;
+    },
+    /* what the drive scripts assert on. Sim state only — no rendering, no DOM. */
+    _info: function () {
+      if (!st) return null;
+      var B = st.boss, i, bs = [];
+      for (i = 0; i < st.beacons.length; i++) {
+        var b = st.beacons[i]; if (!b.alive) continue;
+        bs.push({ slot: b.slot, x: Math.round(b.x), t: Math.round(b.t * 10) / 10,
+                  prog: Math.round(b.prog * 100) / 100, helpers: b.helpers });
+      }
+      var gs = [];
+      for (i = 0; i < st.gates.length; i++) {
+        var G = st.gates[i], live = 0, j;
+        for (j = 0; j < st.runners.length; j++) if (st.runners[j].alive && st.runners[j].gate === i) live++;
+        for (j = 0; j < st.snipers.length; j++) if (st.snipers[j].alive && st.snipers[j].gate === i) live++;
+        gs.push({ col: G.col, stage: G.stage, state: G.state, live: live, n: G.n || 0 });
+      }
+      return {
+        boss: B ? { kind: B.kind, name: BOSS_NAME[B.kind], hp: B.hp, hpMax: B.hpMax,
+                    alive: B.alive, engaged: B.engaged, mode: B.mode, open: !!B.open,
+                    x: Math.round(B.cx), y: Math.round(B.cy) } : null,
+        portal: st.portal && st.portal.alive
+          ? { hp: st.portal.hp, left: st.portal.left, x: Math.round(st.portal.x) } : null,
+        beacons: bs, gates: gs, camLock: !!st.camLock,
+        runners: st.runners.filter(function (r) { return r.alive; }).length,
+        snipers: st.snipers.filter(function (r) { return r.alive; }).length
+      };
     },
     _state: function () { return st; } };
   var root = typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this);

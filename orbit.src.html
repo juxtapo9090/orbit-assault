@@ -329,6 +329,17 @@ var BG=(function(){
 /* Escaped, not literal: yesterday's build served "I Â· PERIGEE" when the host
    sent no charset. Never again. */
 var LEVEL_NAMES=["I \u00B7 JUNGLE ORBIT","II \u00B7 THE BASE","III \u00B7 CASCADE"];
+/* Which boss each level ends on. CONTRA owns what a Dreadnought/Warboss/Tau/
+   Sorcerer DOES; this table owns which one you actually meet, because the level
+   list lives here. Four bosses are built, three levels exist \u2014 so the ramp is
+   the tutorial boss, the rusher, and the warp fight, and the Tau Commander (2)
+   is coded and sprite-ready for the moment a fourth level lands. Change a number
+   here and that level fights a different boss; nothing else moves. */
+var LEVEL_BOSS=[0,1,3];
+/* Harness override, honoured by loadLevel below. It has to be read BEFORE the
+   build, not patched in after one: build() blanks the 'B' glyph as it consumes
+   it, so a second build on the same level finds no boss at all. */
+var bossOverride=null;
 var curLevel=0;
 var LEVEL=LEVELS[0];
 
@@ -438,6 +449,42 @@ function L(fn,a,b,c,d,e){ try{ if(window.LIGHT&&LIGHT[fn]) return LIGHT[fn](a,b,
 /* The thresholds, alone and testable. Machine speed decides the input; this
    decides nothing else. */
 function pickTier(fps){ return fps>=50?2:(fps>=35?1:0); }
+/* ---- one-way promotion ----
+   The lock exists so a boss explosion cannot drop bloom in the one moment you
+   want it. It was never meant to hold a fast machine at Low all session because
+   the first two seconds happened to be busy — a background tab waking up, a
+   compositor hiccup, someone else's build finishing. So the tier may CLIMB, on
+   five consecutive seconds of real headroom, and may never fall: a picture that
+   only ever gets better is a picture nobody has to think about. The thresholds
+   sit above the tier they promote INTO (55 to leave Low, 58 to leave Medium), so
+   a machine sitting on a boundary cannot oscillate — there is nothing to fall
+   back to. */
+var PROMO_NEED=[55,58], PROMO_HOLD=5;
+var promoStreak=0, promoFlash="", promoFlashT=0, promoOn=true;
+/* The decision, alone and testable — the same split pickTier already has, for
+   the same reason: what a loaded machine's framerate happens to be is a fact
+   about the machine, not about this code, and a test that waits for a real
+   headless browser to hold 55fps for five straight seconds is testing the CI
+   box. Pure in, pure out; tierPromote below is the only thing that touches
+   state. */
+function promoteStep(tier,fps,streak){
+  if(tier>=2) return {tier:tier,streak:0};
+  if(!(fps>PROMO_NEED[tier])) return {tier:tier,streak:0};
+  streak++;
+  if(streak>=PROMO_HOLD) return {tier:tier+1,streak:0};
+  return {tier:tier,streak:streak};
+}
+function tierPromote(){
+  if(promoFlashT>0) promoFlashT--;
+  if(!promoOn||!qLocked||QUALITY>=2||STATE!=="play"){ promoStreak=0; return; }
+  var r=promoteStep(QUALITY,dbgFps,promoStreak);
+  promoStreak=r.streak;
+  if(r.tier===QUALITY) return;
+  var was=Q_CHAR[QUALITY];
+  applyQuality(r.tier);
+  promoFlash=dbgFps+"fps\u00B7"+was+" \u2192 "+dbgFps+"fps\u00B7"+Q_CHAR[QUALITY];
+  promoFlashT=2;
+}
 function applyQuality(q){
   q=Math.max(0,Math.min(2,q|0));
   QUALITY=q;
@@ -469,7 +516,22 @@ var W={
   /* Presentation only — never read by the sim, so a peer that skips a frame of
      flash still agrees on every number that matters. */
   flash:function(power,col){ flashT=Math.max(flashT,power||0.6); flashCol=col||"#FFE0A8"; },
+  /* Presentation too — the gate's WARNING is the level banner, not a second text
+     path. It draws on top of everything, which is where a warning belongs. */
+  banner:function(txt,t){ banner=txt; bannerT=t; },
+  /* CONTRA owns the beacon; the core owns what a player IS, so putting one back
+     on their feet has to happen here. groundSpotNear, so a revive never drops
+     somebody into the pit they died in. */
+  revive:function(p,x,y,inv){
+    var spot=groundSpotNear(x);
+    placePlayer(p,spot.x,spot.y-16);
+    p.light=2; p.invT=inv; p.shieldT=inv; p.beaconT=0; p.wasAir=1;
+    stats.deaths--;                     /* a revive un-does the fall, not the fright */
+  },
   J:J, C:C, L:L,
+  /* set per level in loadLevel, before build: which boss, and where this level
+     starts in the run-wide column count the stages and gates are cut on */
+  bossKind:0, colOffset:0,
   levelDone:false, tclock:0
 };
 
@@ -483,6 +545,11 @@ function loadLevel(n){
   }
   rngState=(runSeed^(n*0x9E3779B9))|0;
   W.MAP_W=MAP_W; W.MAP_H=MAP_H; W.tiles=tiles; W.seed=rngState; W.levelDone=false;
+  /* Demanded by CONTRA.build, not defaulted there: a missing kind would quietly
+     hand every stage the same Dreadnought back. */
+  if(LEVEL_BOSS[n]===undefined) throw new Error("LEVEL_BOSS has no boss for level "+n);
+  W.bossKind=(bossOverride===null?LEVEL_BOSS[n]:bossOverride);
+  W.colOffset=levelColOffset();
   buildEntities();
   hasBoss=false;
   for(var y=0;y<MAP_H;y++)for(var x=0;x<MAP_W;x++) if(tiles[y][x]==="B") hasBoss=true;
@@ -507,6 +574,7 @@ function makePlayer(slot,name){
      those, so no enemy ever aims at an empty chair. */
   return {slot:slot,name:name||("P"+(slot+1)),x:0,y:0,w:11,h:15,vx:0,vy:0,onGround:false,face:1,
     aimX:1,aimY:0,prone:false,dead:true,deadT:0,light:2,lives:3,weapon:"n",hAmmo:0,alive:false,
+    fuel:0,beaconT:0,
     color:SLOT_COLORS[slot%SLOT_COLORS.length],
     active:false,
     invT:0,shieldT:0,dropT:0,sq:0,coyoteT:0,bufferT:0,rising:false,wasAir:0,fireCd:0,prevJ:false,prevDrop:false,
@@ -557,6 +625,7 @@ function placePlayer(p,x,y){
   p.x=x;p.y=y;p.vx=0;p.vy=0;p.onGround=false;
   p.dead=false;p.deadT=0;p.coyoteT=0;p.bufferT=0;p.rising=false;p.wasAir=0;
   p.light=2;p.invT=0;p.shieldT=0;p.dropT=0;p.sq=0;p.prone=false;p.h=15;p.fireCd=0;
+  p.beaconT=0;
   p.trail.length=0;p.arcPts.length=0;
 }
 function resetPlayers(){
@@ -572,7 +641,7 @@ function restartAll(){
   tick=0; loadLevel(0);stats.deaths=0;stats.time=0;stats.score=0;
   banner="";bannerT=0;trans.dir=0;trans.t=0;intensity=0;
   bgStage=-1; bgPrev=-1; bgFadeT=0;
-  for(var i=0;i<players.length;i++){ var q=players[i]; q.lives=3; q.alive=q.active; q.dead=!q.active; q.weapon="n"; q.hAmmo=0; q.shieldT=0; q.score=0; q.bombs=BOMB_START; q.bombCd=0; q.prevB=false; }
+  for(var i=0;i<players.length;i++){ var q=players[i]; q.lives=3; q.alive=q.active; q.dead=!q.active; q.weapon="n"; q.hAmmo=0; q.fuel=0; q.beaconT=0; q.shieldT=0; q.score=0; q.bombs=BOMB_START; q.bombCd=0; q.prevB=false; }
   resetPlayers();
 }
 
@@ -643,8 +712,12 @@ function updateCam(){
   var tx=sx-VW/2+vx*0.32;
   var ty=sy-VH/2+18;
   /* Contra's rule: the screen only ever advances. What you passed is gone, and a
-     respawn can never scroll you back out of the fight you died in. */
-  cam.x=Math.max(cam.x,cam.x+(tx-cam.x)*0.10);
+     respawn can never scroll you back out of the fight you died in.
+     A mini-boss gate is that rule turned all the way up — the screen stops dead
+     until the room is clear. Vertical keeps tracking, or a gate on a tall map
+     would fight the player's own jumps. */
+  var locked=false; try{ locked=!!K("camLocked"); }catch(e){}
+  if(!locked) cam.x=Math.max(cam.x,cam.x+(tx-cam.x)*0.10);
   cam.y+=(ty-cam.y)*0.07;
   cam.x=Math.max(0,Math.min(MAP_W*TS-VW,cam.x));
   cam.y=Math.max(0,Math.min(MAP_H*TS-VH,cam.y));
@@ -724,7 +797,22 @@ function hurt(p){
 function kill(p){
   if(p.dead||!p.alive) return;
   p.dead=true;p.deadT=0;stats.deaths++;
-  p.weapon="n"; p.hAmmo=0; p.bombs=BOMB_START; p.bombCd=0; p.prevB=false;
+  p.weapon="n"; p.hAmmo=0; p.fuel=0; p.bombs=BOMB_START; p.bombCd=0; p.prevB=false;
+  /* Co-op only. Alone there is nobody to come back for you, so the beacon would
+     just be a fifteen-second stare at your own corpse.
+     The spot is groundSpotNear, not the exact death point, and that is the whole
+     mechanic working rather than an approximation of it: the commonest death in
+     this game is falling down a hole, and a beacon dropped where you actually
+     died is then somewhere under the floor with nowhere to stand. Same column,
+     real floor — you still walk back to where they fell, you can just get there. */
+  p.beaconT=0;
+  if(activeCount()>1){
+    /* the CENTRE of a player standing on that spot — groundSpotNear returns a
+       top-left corner. The revive circle is measured centre-to-centre, so an
+       off-by-half-a-body here quietly shrinks a 2-tile circle to about one. */
+    var bs=groundSpotNear(p.x+p.w/2);
+    K("dropBeacon",W,p,bs.x+p.w/2,bs.y+p.h/2);
+  }
   J("sfx","hurt"); J("shake",0.85);
   J("burst",p.x+p.w/2,p.y+p.h/2,"#D9544D",22);
   if(!INFINITE_LIVES){ p.lives--; if(p.lives<=0) p.alive=false; }
@@ -851,7 +939,9 @@ function stepPlayer(p){
   var inp=p.inp;
   if(p.dead){
     p.deadT+=DT;
-    if(p.deadT>0.9&&p.alive) respawn(p);
+    /* CONTRA counts the beacon down and clears it when it expires or is left
+       behind, so this is the whole handshake: while it is lit, no auto-respawn. */
+    if(p.deadT>0.9&&p.alive&&!(p.beaconT>0)) respawn(p);
     return;
   }
   if(!p.alive) return;
@@ -920,7 +1010,9 @@ function stepPlayer(p){
   else { p.rising=false; p.vy+=P.gFall*DT; }
   if(p.vy>P.termVel) p.vy=P.termVel;
 
-  if(inp.f&&p.fireCd<=0) fire(p);
+  /* The flame is continuous and area, so it never goes through fire(): CONTRA
+     runs the cone off the same held f bit. Nothing is spawned, nothing is pooled. */
+  if(inp.f&&p.fireCd<=0&&p.weapon!=="f") fire(p);
   if(inp.b&&!p.prevB&&p.bombs>0&&p.bombCd<=0) throwBomb(p);
   p.prevB=!!inp.b;
 
@@ -1529,7 +1621,17 @@ function draw(){
   hl.className=mp.light<2?"low":"";
   document.getElementById("hLevel").textContent=(curLevel+1)+"/"+LEVELS.length;
   document.getElementById("hLives").textContent=INFINITE_LIVES?"\u221E":(mp.alive?mp.lives:"—");
-  document.getElementById("hGun").textContent=mp.weapon.toUpperCase()+(mp.weapon==="h"?"\u00B7"+mp.hAmmo:"")+(mp.shieldT>0?" ◆":"");
+  /* The flamethrower has no ammo count, it has a burn clock — so it gets a bar,
+     not a number. Ten blocks, draining only while the trigger is down. */
+  var gunTxt;
+  if(mp.weapon==="f"){
+    var lit=Math.ceil(mp.fuel/CONTRA.FLAME_FUEL*10);
+    gunTxt="F";
+    for(var fi=0;fi<10;fi++) gunTxt+=(fi<lit?"\u25A0":"\u25A1");
+  } else {
+    gunTxt=mp.weapon.toUpperCase()+(mp.weapon==="h"?"\u00B7"+mp.hAmmo:"");
+  }
+  document.getElementById("hGun").textContent=gunTxt+(mp.shieldT>0?" ◆":"");
   document.getElementById("hBomb").textContent="💣"+mp.bombs;
   document.getElementById("hScore").textContent=stats.score;
   var bh=""; try{ bh=K("hud",W)||""; }catch(err){}
@@ -1538,13 +1640,16 @@ function draw(){
   if(netOn()){ var st=NET.status(); hn.textContent=st.room+" · "+st.nPlayers+"p · "+st.rttMs+"ms · d"+NET_DELAY+" · "+(st.transport||"WS"); hn.className=netStalled?"stall":""; }
   else { hn.textContent="solo"; hn.className="off"; }
   var hfps=document.getElementById("hFps");
-  if(hfps) hfps.textContent=dbgFps+"fps\u00B7"+Q_CHAR[QUALITY];
+  if(hfps){
+    hfps.textContent=promoFlashT>0?promoFlash:(dbgFps+"fps\u00B7"+Q_CHAR[QUALITY]);
+    hfps.className=promoFlashT>0?"low":"";
+  }
 }
 
 /* ================= loop ================= */
 var acc=0,prev=performance.now(),dbgFps=60,dbgFrames=0,dbgLast=performance.now();
 function frame(now){
-  dbgFrames++; if(now-dbgLast>=1000){ dbgFps=dbgFrames; dbgFrames=0; dbgLast=now; window.dbgFps=dbgFps; }
+  dbgFrames++; if(now-dbgLast>=1000){ dbgFps=dbgFrames; dbgFrames=0; dbgLast=now; window.dbgFps=dbgFps; tierPromote(); }
   /* The tier probe. Only real play counts — the title screen holds the world
      still and is cheap, so measuring there would promise a framerate the game
      cannot keep. The clock starts on the first play frame, which puts the level
@@ -1718,18 +1823,53 @@ window.__dbg=function(){ return {tick:tick,state:STATE,hist:HIST,score:stats.sco
    each tier does not depend on actually owning a slow machine. */
 window.__quality=function(){ return {tier:QUALITY,name:Q_CHAR[QUALITY],scale:SCALE,
   locked:qLocked,frames:qFrames,avgFps:Math.round(qAvgFps*10)/10,
-  canvas:[canvas.width,canvas.height],lightQ:(window.LIGHT?LIGHT.QUALITY:null)}; };
+  canvas:[canvas.width,canvas.height],lightQ:(window.LIGHT?LIGHT.QUALITY:null),
+  promote:{on:promoOn,streak:promoStreak,hold:PROMO_HOLD,
+           need:(QUALITY<2?PROMO_NEED[QUALITY]:null),flash:promoFlashT>0?promoFlash:""},
+  fps:dbgFps}; };
 window.__pickTier=pickTier;
+window.__promoteStep=promoteStep;
 /* __pose: the marine sheet+frame the renderer is about to use, plus his screen box,
    so drive_anim.py can crop tight on him and name the pose instead of guessing. */
 window.__pose=function(){ var q=players[me]; if(!q) return null;
   var pz=playerPose(q,q.slot%5);
   return {kind:pz?pz.kind:"canvas",frame:pz?pz.frame:-1,cell:pz?pz.cell:0,
     onGround:!!q.onGround,prone:!!q.prone,dead:!!q.dead||!q.alive,aimX:q.aimX,aimY:q.aimY,tick:tick,
-    px:q.x+q.w/2,py:q.y+q.h/2,cx:view.x,cy:view.y,VW:VW,VH:VH}; };window.__setQuality=function(q){ qLocked=true; applyQuality(q); return window.__quality(); };
+    px:q.x+q.w/2,py:q.y+q.h/2,cx:view.x,cy:view.y,VW:VW,VH:VH}; };/* Forcing a tier turns promotion OFF unless the caller asks for it: a screenshot
+   of Low that quietly promoted to Medium halfway through is a screenshot of
+   nothing. Pass true as the second argument to test the promotion itself. */
+window.__setQuality=function(q,allowPromote){ qLocked=true; promoOn=!!allowPromote; promoStreak=0; applyQuality(q); return window.__quality(); };
+window.__contra=function(){ try{ return CONTRA._info(); }catch(e){ return {error:String(e)}; } };
+window.__boss=function(){ var i=window.__contra(); return i&&i.boss; };
 window.__give=function(kind,slot){ return K("grant",W,slot||me,kind); };
+/* The local player, in the terms the tests actually ask about. Asserting on the
+   HUD string alone made every weapon test also a test of whether the player had
+   been killed in the last frame, and the two failures read identically. */
+window.__me=function(slot){ var p=players[slot===undefined?me:slot]; if(!p) return null;
+  return {weapon:p.weapon,fuel:Math.round(p.fuel*100)/100,hAmmo:p.hAmmo,bombs:p.bombs,
+    dead:!!p.dead,alive:!!p.alive,light:p.light,shieldT:Math.round(p.shieldT*100)/100,
+    invT:Math.round(p.invT*100)/100,beaconT:Math.round(p.beaconT*10)/10,
+    x:Math.round(p.x),y:Math.round(p.y)}; };
+/* Kill a slot outright, for the tests that need a death at a known moment.
+   SOLO ONLY, and it says so rather than half-working: kill() mutates sim state,
+   so calling it on one peer of a lockstep room desyncs the room. A co-op death
+   has to arrive the way every other one does — through the input byte. */
+window.__kill=function(slot){
+  if(netOn()) throw new Error("__kill would desync a coop room — kill through inputs instead");
+  var p=players[slot===undefined?me:slot];
+  if(!p||!p.active||!p.alive||p.dead) return false;
+  kill(p); return true;
+};
 window.__pool=function(){ return {alive:K("poolCount",W),cap:CONTRA.POOL_CAP,bullets:bullets.length}; };
-window.__level=function(n){ loadLevel(n); resetPlayers(); updateCam(); updateView(); return curLevel; };
+/* The second argument overrides LEVEL_BOSS for this load. Three levels exist and
+   four bosses are built, so without it the Tau Commander is a fight nobody can
+   ever look at — coded, sprite-ready and invisible. Harness only; a real level
+   load always goes through the table. */
+window.__level=function(n,bossKind){
+  bossOverride=(bossKind===undefined?null:bossKind);
+  try{ loadLevel(n); } finally { bossOverride=null; }
+  resetPlayers(); updateCam(); updateView(); return curLevel;
+};
 window.__warp=function(x){ cam.x=Math.max(0,Math.min(MAP_W*TS-VW,x-VW/2)); for(var i=0;i<players.length;i++){ var sp=groundSpotNear(x+i*12); players[i].x=sp.x; players[i].y=sp.y-20; } };
 setupPlayers(1,["P1"]);
 loadLevel(0);

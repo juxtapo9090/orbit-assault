@@ -33,6 +33,15 @@ SHEETS = [
     ("enemies.webp", 24, 3, "bottom", ["runner", "sniper", "cultist"]),
     ("turret-chaos.webp", 24, 2, "center", "turret"),
     ("boss-dreadnought.webp", 128, 1, "bottom", "boss"),
+    # gameplay-depth contract (2026-09-04): one boss per stage, three frames each.
+    #   warboss  = idle / charge / stunned   feet on the floor, so "bottom"
+    #   tau      = hover / shield / fire     it flies, so "center"
+    #   sorcerer = cast / teleport / portal  it floats, so "center"
+    # All three renders are drawn as FRAMED panels, which the grey key cannot see;
+    # "unbox" takes the boxes off and re-keys a tinted checker inside one. See unbox().
+    ("boss-warboss.webp", 128, 3, "bottom", "boss-warboss", "unbox", "despeck", "noline"),
+    ("boss-tau-commander.webp", 128, 3, "center", "boss-tau", "unbox", "despeck", "noline"),
+    ("boss-chaos-sorcerer.webp", 128, 3, "center", "boss-sorcerer", "unbox", "despeck", "noline"),
     ("pickups.webp", 16, 5, "center", ["capsule", "pick-s", "pick-l", "pick-b", "crate"]),
     # weapons contract (2026-09-04): missile frames = straight, up, down, flare;
     # skull frames = idle, firing, bank-left, bank-right; hawk = one frame, faces right.
@@ -80,6 +89,68 @@ def keep_solid(alpha):
     body = lab == (int(sizes.argmax()) + 1)
     mask = ndimage.binary_dilation(body, iterations=3)
     return np.where(mask, alpha, 0).astype(np.uint8)
+
+
+def strip_panel_boxes(alpha, rgb):
+    """The boss renders are drawn as framed panels — a thin dark box round each
+    pose. It is too dark for the checker key to touch, and on the sorcerer sheet
+    the three boxes share their edges, so the border comes through as one long
+    rectangle that welds all three poses into a single blob: split_frames then
+    sees one figure where there are three.
+
+    A drawn box is the one thing on these sheets that is dark, huge and hollow.
+    Measured over the three: every box fills under 4% of its own bounding box,
+    every figure fills over 16%. Cut at 12%, and only for a blob big enough to be
+    a frame in the first place, so a dark gun-barrel is never mistaken for one."""
+    dark = (alpha > 0) & (rgb.astype(int).mean(axis=2) < 85)
+    lab, n = ndimage.label(dark)
+    if n < 1:
+        return alpha
+    objs = ndimage.find_objects(lab)
+    sizes = ndimage.sum(dark, lab, index=np.arange(1, n + 1))
+    h, w = alpha.shape
+    for i in range(n):
+        sl = objs[i]
+        bw, bh = sl[1].stop - sl[1].start, sl[0].stop - sl[0].start
+        if bw < w * 0.25 and bh < h * 0.25:
+            continue
+        if sizes[i] / (bw * bh) >= 0.12:
+            continue
+        alpha[lab == i + 1] = 0
+        print(f"    unbox: panel frame {bw}x{bh} removed ({int(sizes[i])} px, fill {sizes[i]/(bw*bh):.3f})")
+    return alpha
+
+
+def strip_panel_tint(alpha, rgb, frames, tol=30):
+    """One panel (the sorcerer's cast pose) has its OWN checkerboard painted in,
+    tinted purple — the grey key leaves it as a solid slab behind the figure.
+    Whatever still hugs a panel's inner ring after the box is off IS that panel's
+    background: take the two colours that dominate the ring and key them out.
+    A panel that is already clean has an empty ring and is left alone.
+    Returns the frame boxes re-fitted to what actually survives."""
+    out = []
+    for (x0, y0, x1, y1) in frames:
+        sub_a, sub_c = alpha[y0:y1, x0:x1], rgb[y0:y1, x0:x1].astype(int)
+        ring = np.zeros(sub_a.shape, bool)
+        m = max(4, int(min(sub_a.shape) * 0.05))
+        ring[:m, :] = ring[-m:, :] = ring[:, :m] = ring[:, -m:] = True
+        lit = ring & (sub_a > 0)
+        if lit.sum() > ring.sum() * 0.30:
+            q = sub_c[lit] // 16
+            keys, counts = np.unique(q[:, 0] * 256 + q[:, 1] * 16 + q[:, 2], return_counts=True)
+            for k in keys[np.argsort(counts)[-2:]]:
+                c = np.array([(k // 256) * 16 + 8, ((k // 16) % 16) * 16 + 8, (k % 16) * 16 + 8])
+                sub_a[np.sqrt(((sub_c - c) ** 2).sum(axis=2)) < tol] = 0
+            # the keyed check leaves a crumb at every cell corner; open them off
+            body = ndimage.binary_dilation(ndimage.binary_opening(sub_a > 0, iterations=2), iterations=2)
+            sub_a[~body] = 0
+            alpha[y0:y1, x0:x1] = sub_a
+            print(f"    unbox: tinted panel at x={x0} re-keyed")
+        ys, xs = np.nonzero(sub_a > 0)
+        if not len(xs):
+            sys.exit(f"unbox: panel at x={x0} emptied out — the ring key ate the figure")
+        out.append((x0 + int(xs.min()), y0 + int(ys.min()), x0 + int(xs.max()) + 1, y0 + int(ys.max()) + 1))
+    return out
 
 
 def trim_thin_edges(alpha, x0, y0, x1, y1):
@@ -266,10 +337,17 @@ def main():
         alpha = key_checkerboard(rgb, tonekey="tonekey" in flags, noline="noline" in flags)
         if "solid" in flags:
             alpha = keep_solid(alpha)
-        rgba = np.dstack([rgb, alpha])
+        if "unbox" in flags:
+            print(f"  {raw}:")
+            alpha = strip_panel_boxes(alpha, rgb)
         frames = split_frames(alpha, expect, raw, despeck="despeck" in flags)
+        if "unbox" in flags:
+            frames = strip_panel_tint(alpha, rgb, frames)
         if trim:
             frames = [trim_thin_edges(alpha, *f) for f in frames]
+        # AFTER every edit to alpha, not before: dstack copies, so an rgba built up
+        # top would still carry the crumbs despeck and unbox just erased.
+        rgba = np.dstack([rgb, alpha])
         if isinstance(names, str):
             save(pack(rgba, frames, cell, anchor, ref), names)
         else:
