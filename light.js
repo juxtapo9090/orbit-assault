@@ -13,12 +13,19 @@
 //   add(x, y, r, color, strength) logical SCREEN coords, additive radial light
 //   composite(ctx)               multiply the light buffer onto the main canvas
 //   bloom(ctx, amount)           bright-pass → blur → additive glow
+//   setQuality(q)                2 = full, 1 = no bloom, 0 = no bloom (caller also
+//                                sends fewer lights). LIGHT.QUALITY reads it back.
 //
 // Order per frame:  begin() → [world draws] → add()×N → composite() → bloom()
 //
 // Cheap by construction: one 1/2-res buffer for light, one 1/4-res pair for
 // bloom, no per-pixel JS. Falls back to a no-op if ctx.filter is unsupported —
 // the game must never lose a frame to decoration.
+//
+// The bright-pass/blur pair is the expensive half: three full-buffer drawImages
+// plus a real blur filter, every frame. That is the first thing to drop on a
+// tablet, and dropping it costs nothing but glow — the multiply that makes the
+// dark actually dark stays on at every tier above zero.
 // ============================================================================
 (function () {
   'use strict';
@@ -29,6 +36,7 @@
   var bpCv = null, bpCx = null;            // bright pass, quarter res
   var blurCv = null, blurCx = null;        // blurred bright pass
   var ok = false, hasFilter = false, reduced = false;
+  var quality = 2;                         // 2 high, 1 medium, 0 low
 
   function mk(w, h) {
     var c = document.createElement('canvas');
@@ -137,6 +145,7 @@
   // genuine highlights survive. Cheaper and more selective than a threshold in JS.
   function bloom(ctx, amount) {
     if (!ok || !hasFilter || !main) return;
+    if (quality < 2) return;               // medium and low keep the multiply, lose the glow
     var amt = amount == null ? 0.55 : amount;
     if (amt <= 0.01) return;
     try {
@@ -170,8 +179,19 @@
     } catch (e) { }
   }
 
-  window.LIGHT = {
+  // Tier gate. The bloom buffers stay allocated — a session that dropped to low
+  // on a bad first two seconds is not worth a re-allocation, and they are 1/9 res.
+  function setQuality(q) {
+    q = q | 0;
+    quality = q < 0 ? 0 : (q > 2 ? 2 : q);
+    LIGHT.QUALITY = quality;
+    return quality;
+  }
+
+  var LIGHT = {
     init: init, resize: resize, begin: begin,
-    add: add, composite: composite, bloom: bloom
+    add: add, composite: composite, bloom: bloom,
+    setQuality: setQuality, QUALITY: 2
   };
+  window.LIGHT = LIGHT;
 })();

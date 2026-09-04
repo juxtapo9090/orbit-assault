@@ -6,6 +6,10 @@
 //   step(W, DT)                 one sim tick (deterministic: W.rng() only, no splice)
 //   draw(g, cx, cy, lights, W)  world draw with camera offset; pushes [x,y,r,col,a]
 //   hud(W)                      "BOSS ████░░" while a boss is engaged, else ""
+//   throwGrenade(W,x,y,vx,vy,o) the core's bomb throw — pooled, returns the slot
+//   stepGrenades(W, DT)         grenade physics + the explosion test
+//   drawGrenades(g,cx,cy,lights) grenades only; step()/draw() already call these,
+//                               they are exported for tests, not for a second call
 //
 // Determinism: every random draw is W.rng(); entities die by alive=false and
 // dead slots are reused in index order; arrays only compact in build().
@@ -17,6 +21,26 @@
   var G_FALL = 2900, TERM = 900;              // same feel as the core walkers
   var RED = '#E0616B', RED_LO = '#A33F58', STEEL = '#495499', STEEL_HI = '#8B96C8';
   var HOT = '#FFD9DE', WARM = '#F5C15C';
+  var BOOM = '#FF7A2A', BOOM_HI = '#FFE0A8', BOOM_LO = '#C0341C';
+
+  // Grenades fall slower than bodies do — G_FALL (2900) at vy=-220 gives an
+  // 8px hop, which is not a throw, it is a drop. 900 puts the apex ~27px up and
+  // lands it ~5 tiles ahead of a standing player: a lob you can aim by walking.
+  var G_GREN = 900;
+  var BLAST = 5 * TS;                         // 5 tiles, CONTRACT-INPUT §6
+  var BLAST_DMG = 5;                          // to a turret, a boss port, the core
+
+  // ---- weapons contract (2026-09-04) ----
+  // One cap for every live projectile in the sim: player shots + missiles,
+  // enemy shots, grenades. Full pool = the shot nearest to expiring is recycled
+  // first. Pure function of sim state, so every peer recycles the same one.
+  // JUICE particles have their own 200-slot pool and are paint, not sim.
+  var POOL_CAP = 200;
+  var MISSILE_TURN = 3 * Math.PI / 180;       // per tick, not instant lock
+  var MISSILE_DMG = 3;
+  var DRONE_LIFE = 30, DRONE_CD = 2.0, DRONE_RANGE = 14 * TS;
+  var HAWK_TIME = 2.0, HAWK_BOSS = 0.25;
+  var BONE = '#E8E0C8', GOLD = '#F0B04A';
 
   var st = null;                              // whole module state; rebuilt per level
   var nextId = 1;
@@ -25,7 +49,8 @@
     nextId = 1;
     return {
       runners: [], snipers: [], turrets: [], spawners: [],
-      capsules: [], pickups: [], ebullets: [], boss: null
+      capsules: [], pickups: [], ebullets: [], grenades: [], boss: null,
+      drones: [], hawk: null
     };
   }
 
@@ -41,7 +66,7 @@
     }
     return best;
   }
-  function hittable(p) { return p.alive && !p.dead && !(p.invT > 0); }
+  function hittable(p) { return p.alive && !p.dead && !(p.invT > 0) && !(p.shieldT > 0); }
   function anyPlayerWithin(W, x, tiles) {
     for (var i = 0; i < W.players.length; i++) {
       var p = W.players[i];
@@ -63,7 +88,7 @@
     for (var y = ty; y < W.MAP_H; y++) if (W.solidAt(tx, y) || W.oneWayAt(tx, y)) return y * TS;
     return W.MAP_H * TS;
   }
-  function bulletDmg(kind) { return kind === 'l' ? 3 : 1; }
+  function bulletDmg(kind) { return kind === 'l' ? 3 : (kind === 'h' ? MISSILE_DMG : 1); }
   function bulletHitOnce(b, id) {            // laser pierces: remember what it already hit
     if (b.kind !== 'l') { b.alive = false; return true; }
     if (!b.cHit) b.cHit = [];
@@ -72,8 +97,31 @@
     return true;
   }
 
+  // ---------- projectile pool cap ----------
+  function poolRoom(W) {
+    if (!st) return;
+    var n = 0, oldest = null, i, b;
+    var lists = [W.bullets, st.ebullets, st.grenades];
+    for (var k = 0; k < lists.length; k++) {
+      var L = lists[k]; if (!L) continue;
+      for (i = 0; i < L.length; i++) {
+        b = L[i]; if (!b.alive) continue;
+        n++;
+        if (!oldest || b.ttl < oldest.ttl) oldest = b;
+      }
+    }
+    if (n >= POOL_CAP && oldest) oldest.alive = false;
+  }
+  function poolCount(W) {
+    var n = 0, lists = [W.bullets, st ? st.ebullets : null, st ? st.grenades : null];
+    for (var k = 0; k < lists.length; k++) { var L = lists[k]; if (!L) continue; for (var i = 0; i < L.length; i++) if (L[i].alive) n++; }
+    return n;
+  }
+
   // ---------- enemy bullets ----------
+  var curW = null;                            // the W of the running step, for fire()
   function fire(x, y, vx, vy, src) {
+    if (curW) poolRoom(curW);
     var eb = st.ebullets, b = null;
     for (var i = 0; i < eb.length; i++) if (!eb[i].alive) { b = eb[i]; break; }
     if (!b) { b = {}; eb.push(b); }
@@ -115,7 +163,7 @@
     return r;
   }
   function stepRunners(W, DT) {
-    var rs = st.runners, SPEED = 115, JUMP = 390;
+    var rs = st.runners, SPEED = 85, JUMP = 390;
     for (var i = 0; i < rs.length; i++) {
       var e = rs[i]; if (!e.alive) continue;
       e.t += DT;
@@ -284,20 +332,185 @@
         var p = W.players[j];
         if (!p.alive || p.dead) continue;
         if (rectsOverlap(k.x - 6, k.y - 6, 12, 12, p.x, p.y, p.w, p.h)) {
-          k.alive = false; p.weapon = k.kind;
-          W.J('sfx', 'pickup'); W.J('burst', k.x, k.y, WARM, 14);
+          k.alive = false;
+          if (k.kind === 'b') { p.shieldT = 5; }
+          else if (k.kind === 'h') { p.weapon = 'h'; p.hAmmo = 30; }
+          else if (k.kind === 'd') { spawnDrone(W, p); }
+          else if (k.kind === 't') { startHawk(W, p); }
+          else { p.weapon = k.kind; }
+          W.J('sfx', 'pickup'); W.J('burst', k.x, k.y, pickColor(k.kind), 14);
           W.score(500, p);
           break;
         }
       }
     }
   }
+  function pickColor(kind) {
+    return kind === 'l' ? '#7FD2F0' : kind === 'b' ? '#6EE7F0' : kind === 'h' ? RED : kind === 'd' ? BONE : kind === 't' ? GOLD : WARM;
+  }
+  // Capsule odds. T is the rare one (5%); S/L/B keep the lion's share.
   function dropPickup(W, x, y) {
-    var kind = W.rng() < 0.3 ? 'l' : 's';
+    var roll = W.rng();
+    var kind = roll < 0.05 ? 't' : roll < 0.17 ? 'd' : roll < 0.32 ? 'h' : roll < 0.57 ? 'b' : roll < 0.75 ? 'l' : 's';
     var ps = st.pickups, k = null;
     for (var i = 0; i < ps.length; i++) if (!ps[i].alive) { k = ps[i]; break; }
     if (!k) { k = {}; ps.push(k); }
     k.alive = true; k.x = x; k.y = y; k.vy = -40; k.kind = kind; k.grounded = false; k.t = 0;
+  }
+
+  // ---------- targets: everything a missile can chase or a laser can chip ----------
+  // fn(x, y, obj, kind) over every live hostile, index order — the same order on
+  // every peer, so "nearest" ties break the same way everywhere.
+  function eachTarget(W, fn) {
+    var i, o;
+    for (i = 0; i < st.runners.length; i++) { o = st.runners[i]; if (o.alive) fn(o.x + o.w / 2, o.y + o.h / 2, o, 'r'); }
+    for (i = 0; i < st.snipers.length; i++) { o = st.snipers[i]; if (o.alive) fn(o.x + o.w / 2, o.y + o.h / 2, o, 's'); }
+    for (i = 0; i < st.turrets.length; i++) { o = st.turrets[i]; if (o.alive) fn(o.x, o.y, o, 't'); }
+    for (i = 0; i < st.capsules.length; i++) { o = st.capsules[i]; if (o.state === 1) fn(o.x, o.y, o, 'c'); }
+    var wk = W.enemies;
+    if (wk) for (i = 0; i < wk.length; i++) { o = wk[i]; if (o.alive) fn(o.x + o.w / 2, o.y + o.h / 2, o, 'w'); }
+    var B = st.boss;
+    if (B && B.alive && B.engaged) {
+      for (i = 0; i < 3; i++) { o = B.ports[i]; if (o.alive) fn(o.x, o.y, o, 'p'); }
+      fn(B.cx, B.cy, B, 'B');
+    }
+  }
+  function nearestTarget(W, x, y, maxD) {
+    var best = null, bd = maxD ? maxD * maxD : 1e18;
+    eachTarget(W, function (tx, ty, o, kind) {
+      var dx = tx - x, dy = ty - y, d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = { x: tx, y: ty, o: o, kind: kind }; }
+    });
+    return best;
+  }
+  // Chip damage: one point, the same rules a bullet obeys (closed turret and
+  // closed boss shell shrug it off). Used by the servo-skull's laser.
+  function chip(W, t, owner) {
+    var o = t.o, k = t.kind;
+    if (k === 'r') { o.alive = false; W.score(100, owner); W.J('burst', t.x, t.y, RED, 12); W.J('sfx', 'enemyDie'); }
+    else if (k === 's') { o.alive = false; W.score(200, owner); W.J('burst', t.x, t.y, RED, 12); W.J('sfx', 'enemyDie'); }
+    else if (k === 'w') { o.alive = false; W.score(200, owner); W.J('burst', t.x, t.y, '#63C08A', 14); W.J('sfx', 'enemyDie'); }
+    else if (k === 'c') { o.state = 2; W.score(100, owner); dropPickup(W, o.x, o.y); W.J('burst', o.x, o.y, WARM, 12); W.J('sfx', 'enemyDie'); }
+    else if (k === 't') {
+      if (!o.open) { W.J('sfx', 'turretHit'); return; }
+      o.hp -= 1; o.flash = 0.1; W.J('sfx', 'turretHit');
+      if (o.hp <= 0) { o.alive = false; W.score(500, owner); W.J('burst', o.x, o.y, RED, 18); W.J('sfx', 'enemyDie'); W.J('shake', 0.3); }
+    } else if (k === 'p') {
+      o.hp -= 1; o.flash = 0.1; W.J('sfx', 'bossHit');
+      if (o.hp <= 0) { o.alive = false; W.score(1000, owner); W.J('burst', o.x, o.y, RED, 20); W.J('sfx', 'enemyDie'); W.J('shake', 0.4); }
+    } else if (k === 'B') {
+      if (!o.open) { W.J('sfx', 'turretHit'); return; }
+      damageBossCore(W, o, 1, owner);
+    }
+  }
+
+  // ---------- homing missiles ----------
+  // The core launches them as bullets of kind 'h'; we bend them. atan2 to the
+  // nearest hostile, at most MISSILE_TURN per tick, speed kept — a curve you can
+  // watch, not a snap. No target in range: it flies straight like a dumb rocket.
+  function steerMissiles(W, DT) {
+    var bs = W.bullets;
+    for (var i = 0; i < bs.length; i++) {
+      var b = bs[i]; if (!b.alive || b.kind !== 'h') continue;
+      var t = nearestTarget(W, b.x, b.y, 0);
+      if (!t) continue;
+      var sp = Math.sqrt(b.vx * b.vx + b.vy * b.vy) || 1;
+      var cur = Math.atan2(b.vy, b.vx), want = Math.atan2(t.y - b.y, t.x - b.x);
+      var d = want - cur;
+      while (d > Math.PI) d -= 2 * Math.PI;
+      while (d < -Math.PI) d += 2 * Math.PI;
+      if (d > MISSILE_TURN) d = MISSILE_TURN; else if (d < -MISSILE_TURN) d = -MISSILE_TURN;
+      var a = cur + d;
+      b.vx = Math.cos(a) * sp; b.vy = Math.sin(a) * sp;
+    }
+  }
+
+  // ---------- servo-skull drone ----------
+  // One per player slot, keyed by slot. Lives in st, so a level load (fresh())
+  // clears it — the skull is a stage buddy, not a permanent upgrade.
+  function spawnDrone(W, p) {
+    var d = st.drones[p.slot];
+    if (!d) { d = {}; st.drones[p.slot] = d; }
+    d.alive = true; d.slot = p.slot; d.life = DRONE_LIFE; d.cd = 0.6; d.t = 0;
+    d.x = p.x + p.w / 2 - p.face * 15; d.y = p.y - 20; d.face = p.face; d.bankT = 0;
+    d.fireT = 0; d.laserT = 0; d.lx = d.x; d.ly = d.y;
+  }
+  function stepDrones(W, DT) {
+    for (var i = 0; i < st.drones.length; i++) {
+      var d = st.drones[i]; if (!d || !d.alive) continue;
+      var p = W.players[d.slot];
+      d.t += DT; d.life -= DT;
+      if (!p || !p.alive || p.dead || d.life <= 0) {
+        d.alive = false; W.J('burst', d.x, d.y, BONE, 10); W.J('sfx', 'turretHit');
+        continue;
+      }
+      if (p.face !== d.face) { d.face = p.face; d.bankT = 0.3; }
+      if (d.bankT > 0) d.bankT -= DT;
+      if (d.fireT > 0) d.fireT -= DT;
+      if (d.laserT > 0) d.laserT -= DT;
+      var tx = p.x + p.w / 2 - p.face * 15, ty = p.y - 20;
+      d.x += (tx - d.x) * 0.15; d.y += (ty - d.y) * 0.15;
+      d.cd -= DT;
+      if (d.cd <= 0) {
+        var t = nearestTarget(W, d.x, d.y, DRONE_RANGE);
+        if (t) {
+          chip(W, t, p);
+          d.lx = t.x; d.ly = t.y; d.laserT = 0.1; d.fireT = 0.2;
+          W.J('sfx', 'laser');
+          d.cd = DRONE_CD;
+        } else d.cd = 0.25;                  // look again soon; the 2s clock starts on a shot
+      }
+    }
+  }
+
+  // ---------- Thunderhawk strafing run ----------
+  // One sprite crossing the screen right to left in HAWK_TIME, and a wave of
+  // death that follows its nose: every hostile on screen dies as the hawk passes
+  // over it, the boss core takes a quarter of its bar once. No projectiles, no
+  // pool — the bombs are bursts, the damage is by position.
+  function startHawk(W, p) {
+    var camX = W.camX(), camY = W.cam ? W.cam.y : 0;
+    st.hawk = { on: true, t: 0, x: camX + W.VW + 70, y: camY + 44, x0: camX, owner: p.slot,
+      speed: (W.VW + 160) / HAWK_TIME, bombT: 0, bossHit: false };
+    W.J('sfx', 'bossDie'); W.J('shake', 0.6);
+    if (W.flash) W.flash(0.5, WARM);
+  }
+  function stepHawk(W, DT) {
+    var H = st.hawk; if (!H || !H.on) return;
+    var owner = W.players[H.owner] || null;
+    H.t += DT; H.x -= H.speed * DT;
+    var camX = W.camX(), camY = W.cam ? W.cam.y : 0;
+    H.y += ((camY + 44) - H.y) * 0.1;
+    if (H.t % 0.1 < DT) W.J('shake', 0.35);               // 4px-ish jitter for the whole run
+    H.bombT -= DT;
+    if (H.bombT <= 0) {                                    // cosmetic bombs along the path
+      H.bombT = 0.12;
+      var by = camY + 60 + ((H.t * 7) % 1) * (W.VH - 90);
+      W.J('burst', H.x - 20, by, BOOM_HI, 10); W.J('burst', H.x - 20, by, BOOM, 8);
+      if (W.flash) W.flash(0.25, BOOM_HI);
+    }
+    // the death wave: on screen AND behind the nose
+    var left = camX - 20, right = camX + W.VW + 20, nose = H.x - 10;
+    var kills = [];
+    eachTarget(W, function (x, y, o, kind) {
+      if (x < left || x > right || x > nose) return;
+      if (kind === 'B') return;
+      kills.push({ x: x, y: y, o: o, kind: kind });
+    });
+    for (var i = 0; i < kills.length; i++) {
+      var k = kills[i];
+      // one bomb is more than a hit point; a turret's shield is no answer to it
+      if (k.kind === 't') { k.o.open = true; k.o.hp = 1; }
+      if (k.kind === 'p') k.o.hp = 1;
+      chip(W, k, owner);                       // score / burst / sfx stay in one place
+    }
+    var B = st.boss;
+    if (B && B.alive && B.engaged && !H.bossHit && B.cx >= left && B.cx <= nose) {
+      H.bossHit = true;
+      damageBossCore(W, B, Math.ceil(B.hpMax * HAWK_BOSS), owner);
+      W.J('burst', B.cx, B.cy, BOOM_HI, 24);
+    }
+    if (H.x < camX - 90) H.on = false;
   }
 
   // ---------- boss ----------
@@ -429,6 +642,140 @@
     }
   }
 
+  // ---------- grenades ----------
+  // The core throws them (it owns p.bombs and the input byte); we own the arc,
+  // the fuse and the blast, because everything a blast can touch lives in here.
+  // Pooled like ebullets: dead slots reused in index order, no splice, so two
+  // peers running the same inputs get the same grenade in the same slot.
+  function throwGrenade(W, x, y, vx, vy, owner) {
+    if (!st) return null;
+    poolRoom(W);
+    var gs = st.grenades, b = null;
+    for (var i = 0; i < gs.length; i++) if (!gs[i].alive) { b = gs[i]; break; }
+    if (!b) { b = {}; gs.push(b); }
+    b.alive = true; b.x = x; b.y = y; b.vx = vx; b.vy = vy; b.ttl = 90; b.owner = owner;
+    b.x1 = x; b.y1 = y; b.x2 = x; b.y2 = y; b.x3 = x; b.y3 = y;
+    W.J('sfx', 'stomp');
+    return b;
+  }
+
+  function within(x, y, ex, ey) {                     // centre-to-centre, blast radius
+    var dx = ex - x, dy = ey - y;
+    return dx * dx + dy * dy <= BLAST * BLAST;
+  }
+
+  function damageBossCore(W, B, n, owner) {
+    B.hp -= n; B.flash = 0.12;
+    W.J('sfx', 'bossHit');
+    if (B.hp <= 0) {
+      B.alive = false; B.hp = 0; W.levelDone = true; W.score(5000, owner);
+      for (var q = 0; q < 3; q++) B.ports[q].alive = false;
+      for (q = 0; q < st.ebullets.length; q++) st.ebullets[q].alive = false;
+      W.J('burst', B.cx, B.cy, WARM, 60); W.J('burst', B.cx, B.cy, RED, 40);
+      W.J('sfx', 'bossDie'); W.J('shake', 1); W.J('hitstop', 6);
+    }
+  }
+
+  function explode(W, x, y, ownerSlot) {
+    var owner = W.players[ownerSlot] || null, i;
+
+    W.J('sfx', 'bossDie');
+    W.J('shake', 0.6);
+    W.J('burst', x, y, BOOM_HI, 30);
+    W.J('burst', x, y, BOOM, 26);
+    W.J('burst', x, y, BOOM_LO, 14);
+    if (W.flash) W.flash(0.75, BOOM_HI);
+
+    for (i = 0; i < st.runners.length; i++) {
+      var e = st.runners[i]; if (!e.alive) continue;
+      if (!within(x, y, e.x + e.w / 2, e.y + e.h / 2)) continue;
+      e.alive = false; W.score(100, owner);
+      W.J('burst', e.x + e.w / 2, e.y + e.h / 2, RED, 12); W.J('sfx', 'enemyDie');
+    }
+    for (i = 0; i < st.snipers.length; i++) {
+      var s = st.snipers[i]; if (!s.alive) continue;
+      if (!within(x, y, s.x + s.w / 2, s.y + s.h / 2)) continue;
+      s.alive = false; W.score(200, owner);
+      W.J('burst', s.x + s.w / 2, s.y + s.h / 2, RED, 12); W.J('sfx', 'enemyDie');
+    }
+    // A turret's shield stops bullets, not a blast wave — that is what a bomb is for.
+    for (i = 0; i < st.turrets.length; i++) {
+      var t = st.turrets[i]; if (!t.alive) continue;
+      if (!within(x, y, t.x, t.y)) continue;
+      t.hp -= BLAST_DMG; t.flash = 0.1;
+      if (t.hp <= 0) {
+        t.alive = false; W.score(500, owner);
+        W.J('burst', t.x, t.y, RED, 18); W.J('sfx', 'enemyDie');
+      } else { W.J('sfx', 'turretHit'); }
+    }
+    for (i = 0; i < st.capsules.length; i++) {
+      var c = st.capsules[i]; if (c.state !== 1) continue;
+      if (!within(x, y, c.x, c.y)) continue;
+      c.state = 2; W.score(100, owner);
+      dropPickup(W, c.x, c.y);
+      W.J('burst', c.x, c.y, WARM, 12); W.J('sfx', 'enemyDie');
+    }
+    // The core's own walkers. W.enemies is the live array, not a copy.
+    var walkers = W.enemies;
+    if (walkers) {
+      for (i = 0; i < walkers.length; i++) {
+        var wk = walkers[i]; if (!wk.alive) continue;
+        if (!within(x, y, wk.x + wk.w / 2, wk.y + wk.h / 2)) continue;
+        wk.alive = false; W.score(200, owner);
+        W.J('burst', wk.x + wk.w / 2, wk.y + wk.h / 2, '#63C08A', 14); W.J('sfx', 'enemyDie');
+      }
+    }
+    var B = st.boss;
+    if (B && B.alive && B.engaged) {
+      for (i = 0; i < 3; i++) {
+        var P = B.ports[i]; if (!P.alive) continue;
+        if (!within(x, y, P.x, P.y)) continue;
+        P.hp -= BLAST_DMG; P.flash = 0.1;
+        W.J('sfx', 'bossHit');
+        if (P.hp <= 0) {
+          P.alive = false; W.score(1000, owner);
+          W.J('burst', P.x, P.y, RED, 20); W.J('sfx', 'enemyDie');
+        }
+      }
+      // The shell only takes damage while it is open — same rule the bullets obey.
+      if (B.alive && B.open && within(x, y, B.cx, B.cy)) damageBossCore(W, B, BLAST_DMG, owner);
+    }
+  }
+
+  function stepGrenades(W, DT) {
+    var gs = st.grenades;
+    for (var i = 0; i < gs.length; i++) {
+      var b = gs[i]; if (!b.alive) continue;
+      b.x3 = b.x2; b.y3 = b.y2; b.x2 = b.x1; b.y2 = b.y1; b.x1 = b.x; b.y1 = b.y;
+      b.vy += G_GREN * DT;
+      if (b.vy > TERM) b.vy = TERM;
+      b.x += b.vx * DT; b.y += b.vy * DT;
+      b.ttl--;
+
+      var out = (b.y > W.MAP_H * TS + 40 || b.x < -40 || b.x > W.MAP_W * TS + 40);
+      if (out) { b.alive = false; continue; }        // gone down a pit: no free blast
+
+      var hit = b.ttl <= 0 || W.solidAt(Math.floor(b.x / TS), Math.floor(b.y / TS));
+      if (!hit) {                                     // contact with anything alive
+        var j;
+        for (j = 0; j < st.runners.length && !hit; j++) {
+          var e = st.runners[j];
+          if (e.alive && circleRect(b.x, b.y, 3, e.x, e.y, e.w, e.h)) hit = true;
+        }
+        for (j = 0; j < st.snipers.length && !hit; j++) {
+          var s = st.snipers[j];
+          if (s.alive && circleRect(b.x, b.y, 3, s.x, s.y, s.w, s.h)) hit = true;
+        }
+        var walkers = W.enemies;
+        for (j = 0; walkers && j < walkers.length && !hit; j++) {
+          var wk = walkers[j];
+          if (wk.alive && circleRect(b.x, b.y, 3, wk.x, wk.y, wk.w, wk.h)) hit = true;
+        }
+      }
+      if (hit) { b.alive = false; explode(W, b.x, b.y, b.owner); }
+    }
+  }
+
   // ---------- build ----------
   function build(W) {
     st = fresh();
@@ -473,14 +820,20 @@
   // ---------- step ----------
   function step(W, DT) {
     if (!st) return;
+    curW = W;
     stepSpawners(W, DT);
     stepRunners(W, DT);
     stepSnipers(W, DT);
     stepTurrets(W, DT);
     stepCapsules(W, DT);
     stepBoss(W, DT);
+    stepGrenades(W, DT);
     stepBullets(W, DT);
+    steerMissiles(W, DT);
+    stepDrones(W, DT);
+    stepHawk(W, DT);
     bulletVsEnemies(W);
+    curW = null;
   }
 
   // ---------- draw ----------
@@ -499,13 +852,38 @@
   function draw(g, cx, cy, lights, W) {
     if (!st) return;
     var VW = W.VW, VH = W.VH, tc = W.tclock || 0, i;
+    // SPRITES is a page global from the core; absent under node (test_contra.js) and
+    // false until every sheet decoded — either way the canvas paths below still draw.
+    var SP = (typeof SPRITES !== 'undefined' && SPRITES.loaded) ? SPRITES : null;
+    function blit(img, sx, w, h, x, y, flipX, rot, alpha) {
+      // draw frame `sx` of a horizontal strip with its CENTRE at (x, y)
+      g.save(); g.imageSmoothingEnabled = false;
+      g.translate(x, y);
+      if (rot) g.rotate(rot);
+      if (flipX) g.scale(-1, 1);
+      if (alpha !== undefined) g.globalAlpha = alpha;
+      g.drawImage(img, sx * w, 0, w, h, -w / 2, -h / 2, w, h);
+      g.restore();
+    }
 
-    // runners: red rounded slab, lean into the run, hot eye
+    // runners: Ork boy — art faces left, so flip when running right
     for (i = 0; i < st.runners.length; i++) {
       var e = st.runners[i]; if (!e.alive) continue;
       var ex = e.x - cx, ey = e.y - cy;
       if (ex < -30 || ex > VW + 30) continue;
       var bob = e.onGround ? Math.abs(Math.sin(e.t * 18)) * 1.5 : 0;
+      if (SP) {
+        // walk sheet: 4-frame charge cycle, one frame every 6 ticks. Its art faces
+        // RIGHT (the old single-pose runner faces left), so the flip is inverted.
+        if (SP.runnerWalk && e.onGround) {
+          blit(SP.runnerWalk, Math.floor((W.tick || 0) / 6) % 4, 24, 24,
+               ex + e.w / 2, ey + e.h - 12 + bob * 0.5, e.dir < 0, 0);
+        } else {
+          blit(SP.runner, 0, 24, 24, ex + e.w / 2, ey + e.h - 12 + bob * 0.5, e.dir > 0, 0);
+        }
+        lights.push([ex + e.w / 2, ey + e.h / 2, 22, RED, 0.22]);
+        continue;
+      }
       var lean = e.dir * 2;
       var rg = g.createLinearGradient(0, ey, 0, ey + e.h);
       rg.addColorStop(0, RED); rg.addColorStop(1, RED_LO);
@@ -520,14 +898,36 @@
       lights.push([ex + e.w / 2, ey + e.h / 2, 22, RED, 0.22]);
     }
 
-    // snipers: tall diamond on a stem, aim line flickers on fire
+    // snipers: Tau fire warrior — art faces right
     for (i = 0; i < st.snipers.length; i++) {
       var s = st.snipers[i]; if (!s.alive) continue;
       var sx = s.x - cx + s.w / 2, sy = s.y - cy;
       if (sx < -30 || sx > VW + 30) continue;
+      if (SP) {
+        // aim sheet: 0 = rifle straight up, 1 = diag-up, 2 = level. Purely a look —
+        // the shot itself is already aimed at the player by stepSnipers. Picked off
+        // the ANGLE to the player, not the height gap: a player three tiles up but
+        // twelve tiles away is nearly level, and a raw height test would read that
+        // as a steep shot. Anything at or below the Tau reads level; snipers perch,
+        // so that is the common case and the sheet has no down pose.
+        if (SP.sniperAim) {
+          var tgt = nearestPlayer(W, s.x + s.w / 2, s.y + 4);
+          var af = 2;
+          if (tgt) {
+            var up = (s.y + s.h / 2) - (tgt.y + tgt.h / 2);
+            var across = Math.abs((tgt.x + tgt.w / 2) - (s.x + s.w / 2));
+            var a = Math.atan2(Math.max(0, up), across);
+            af = a > 1.05 ? 0 : (a > 0.35 ? 1 : 2);   // >60deg / >20deg / level
+          }
+          blit(SP.sniperAim, af, 32, 32, sx, sy + s.h - 16, s.face < 0, 0);
+        } else {
+          blit(SP.sniper, 0, 24, 24, sx, sy + s.h - 12, s.face < 0, 0);
+        }
+      } else {
       g.fillStyle = RED_LO; g.fillRect(sx - 2, sy + 8, 4, 6);
       g.fillStyle = RED; diamond(g, sx, sy + 5, 5.5); g.fill();
       g.fillStyle = HOT; g.fillRect(sx + s.face * 1.5 - 1, sy + 4, 2, 2);
+      }
       if (s.flash > 0) {
         g.strokeStyle = HOT; g.globalAlpha = s.flash / 0.12; g.lineWidth = 1;
         g.beginPath(); g.moveTo(sx, sy + 5); g.lineTo(sx + s.face * 14, sy + 5); g.stroke();
@@ -537,16 +937,30 @@
       lights.push([sx, sy + 5, 20, RED, 0.2]);
     }
 
-    // turrets: steel ring set into the wall; iris opens to a red eye
+    // turrets: Chaos gun-box on a wall bracket; art has the bracket on the LEFT
     for (i = 0; i < st.turrets.length; i++) {
       var t = st.turrets[i]; if (!t.alive) continue;
       var tx = t.x - cx, ty = t.y - cy;
       if (tx < -30 || tx > VW + 30) continue;
+      var open = t.open ? 1 : 0;
+      if (SP) {
+        // side>0 = wall to the right → flip; vert>0 = wall below → bracket points down
+        var rot = t.vert ? (t.vert > 0 ? -Math.PI / 2 : Math.PI / 2) : 0;
+        blit(SP.turret, open, 24, 24, tx, ty, !!(t.side > 0), rot);
+        if (t.flash > 0) { g.fillStyle = '#FFFFFF'; g.globalAlpha = 0.5; g.beginPath(); g.arc(tx, ty, 8, 0, 6.283); g.fill(); g.globalAlpha = 1; }
+        if (open) {
+          var d2 = DIR8[t.aim], n2 = Math.sqrt(d2[0] * d2[0] + d2[1] * d2[1]);
+          g.strokeStyle = t.flash > 0 ? HOT : RED; g.lineWidth = 2; g.globalAlpha = 0.8;
+          g.beginPath(); g.moveTo(tx, ty); g.lineTo(tx + d2[0] / n2 * 10, ty + d2[1] / n2 * 10); g.stroke();
+          g.globalAlpha = 1;
+          lights.push([tx, ty, 26, RED, 0.35]);
+        } else lights.push([tx, ty, 14, STEEL_HI, 0.15]);
+        continue;
+      }
       // mount bar toward the wall
       g.fillStyle = '#2B3159';
       if (t.side) g.fillRect(t.side > 0 ? tx : tx - 8, ty - 3, 8, 6);
       else if (t.vert) g.fillRect(tx - 3, t.vert > 0 ? ty : ty - 8, 6, 8);
-      var open = t.open ? 1 : 0;
       g.fillStyle = t.flash > 0 ? STEEL_HI : STEEL;
       g.beginPath(); g.arc(tx, ty, 7, 0, 6.283); g.fill();
       g.strokeStyle = STEEL_HI; g.lineWidth = 1.2; g.globalAlpha = 0.8;
@@ -571,9 +985,13 @@
       var kx = c.x - cx, ky = c.y - cy;
       if (kx < -30 || kx > VW + 30) continue;
       var pulse = 0.5 + 0.5 * Math.sin(tc * 6);
+      if (SP) {
+        blit(SP.capsule, 0, 16, 16, kx, ky, c.vx < 0, 0);
+      } else {
       g.fillStyle = STEEL; rrect(g, kx - 8, ky - 4, 16, 8, 4); g.fill();
       g.fillStyle = STEEL_HI; g.globalAlpha = 0.6; g.fillRect(kx - 12, ky - 1, 24, 1.5); g.globalAlpha = 1;
       g.fillStyle = WARM; g.beginPath(); g.arc(kx, ky, 2.6 + pulse * 0.6, 0, 6.283); g.fill();
+      }
       lights.push([kx, ky, 30 + pulse * 8, WARM, 0.4]);
     }
     // pickups: letter-in-a-diamond, S or L
@@ -581,11 +999,17 @@
       var k = st.pickups[i]; if (!k.alive) continue;
       var px = k.x - cx, py = k.y - cy - (k.grounded ? Math.abs(Math.sin(tc * 3)) * 2 : 0);
       if (px < -30 || px > VW + 30) continue;
-      g.fillStyle = k.kind === 'l' ? '#7FD2F0' : WARM;
+      var pc = pickColor(k.kind);
+      if (SP && (k.kind === 'l' || k.kind === 'b' || k.kind === 's')) {
+        blit(k.kind === 'l' ? SP.pickL : (k.kind === 'b' ? SP.pickB : SP.pickS), 0, 16, 16, px, py, false, 0);
+      } else {
+      // H / D / T have no sheet: the diamond-and-letter, in their own colour
+      g.fillStyle = pc;
       diamond(g, px, py, 7); g.fill();
       g.fillStyle = '#171C33'; g.font = 'bold 7px monospace'; g.textAlign = 'center'; g.textBaseline = 'middle';
-      g.fillText(k.kind === 'l' ? 'L' : 'S', px, py + 0.5);
-      lights.push([px, py, 28, k.kind === 'l' ? '#7FD2F0' : WARM, 0.35]);
+      g.fillText(k.kind.toUpperCase(), px, py + 0.5);
+      }
+      lights.push([px, py, 28, pc, 0.35]);
     }
 
     // boss: steel bulkhead, three port rings, pulsing warm eye behind an iris
@@ -594,6 +1018,12 @@
       var bx = B.cx - cx, by = B.cy - cy, f = B.face;
       if (bx > -140 && bx < VW + 140) {
         var baseY = B.base - cy;
+        if (SP) {
+          // Chaos Dreadnought, feet on the floor. Art's gun is on screen-left; flip so
+          // it points the way the boss faces. Ports + core stay drawn on top: targets.
+          blit(SP.boss, 0, 128, 128, bx, baseY - 64, f > 0, 0, B.alive ? 1 : 0.6);
+          if (B.flash > 0) { g.fillStyle = '#FFFFFF'; g.globalAlpha = 0.35; g.fillRect(bx - 48, baseY - 120, 96, 120); g.globalAlpha = 1; }
+        } else {
         // bulkhead slab from floor up, against the wall behind
         var hg = g.createLinearGradient(0, baseY - 128, 0, baseY);
         hg.addColorStop(0, '#333B63'); hg.addColorStop(1, '#191F38');
@@ -604,6 +1034,7 @@
         g.strokeStyle = STEEL; g.globalAlpha = 0.5; g.lineWidth = 1;
         for (var r = 1; r < 6; r++) { g.beginPath(); g.moveTo(bx - 34, baseY - r * 21); g.lineTo(bx + 34, baseY - r * 21); g.stroke(); }
         g.globalAlpha = 1;
+        }
         // ports
         for (i = 0; i < 3; i++) {
           var P = B.ports[i], ppx = P.x - cx, ppy = P.y - cy;
@@ -634,6 +1065,44 @@
       }
     }
 
+    // servo-skulls: bob on a sine, bank frame while the player turns, firing
+    // frame held 200ms after a shot, the laser itself a 1px red line for 100ms
+    for (i = 0; i < st.drones.length; i++) {
+      var d = st.drones[i]; if (!d || !d.alive) continue;
+      var dx = d.x - cx, dy = d.y - cy + Math.sin(d.t * 3) * 2;
+      if (dx < -30 || dx > VW + 30) continue;
+      var fr = d.fireT > 0 ? 1 : (d.bankT > 0 ? (d.face > 0 ? 3 : 2) : 0);
+      if (SP && SP.skull) {
+        blit(SP.skull, fr, 24, 24, dx, dy, d.face < 0, 0);
+      } else {
+        g.fillStyle = BONE; g.beginPath(); g.arc(dx, dy - 2, 5, 0, 6.283); g.fill();
+        g.fillStyle = RED; g.fillRect(dx + d.face * 1 - 1, dy - 3, 2, 2);
+        g.strokeStyle = '#3A3A3A'; g.lineWidth = 1; g.beginPath(); g.moveTo(dx, dy + 3); g.lineTo(dx - 1, dy + 9); g.stroke();
+      }
+      if (d.laserT > 0) {
+        g.strokeStyle = '#ff0000'; g.lineWidth = 1; g.globalAlpha = 0.9;
+        g.beginPath(); g.moveTo(dx + d.face * 3, dy - 2); g.lineTo(d.lx - cx, d.ly - cy); g.stroke();
+        g.globalAlpha = 1;
+        lights.push([d.lx - cx, d.ly - cy, 22, RED, 0.5]);
+      }
+      lights.push([dx, dy, 18, RED, d.fireT > 0 ? 0.5 : 0.25]);
+    }
+
+    // Thunderhawk: the art faces right, the run goes left — flipped
+    var H = st.hawk;
+    if (H && H.on) {
+      var hx = H.x - cx, hy = H.y - cy;
+      if (SP && SP.hawk) {
+        blit(SP.hawk, 0, 128, 128, hx, hy, true, 0);
+      } else {
+        g.fillStyle = '#333B63'; g.fillRect(hx - 40, hy - 10, 80, 20);
+        g.fillStyle = GOLD; g.fillRect(hx - 40, hy - 2, 80, 2);
+        g.fillStyle = BOOM; g.fillRect(hx + 40, hy - 6, 14, 12);
+      }
+      lights.push([hx + 48, hy, 40, BOOM, 0.7]);
+      lights.push([hx, hy, 60, GOLD, 0.3]);
+    }
+
     // enemy bullets: hot mote with a 3-point trail
     for (i = 0; i < st.ebullets.length; i++) {
       var b = st.ebullets[i]; if (!b.alive) continue;
@@ -647,6 +1116,29 @@
       g.fillStyle = HOT; g.beginPath(); g.arc(mx, my, 2, 0, 6.283); g.fill();
       lights.push([mx, my, 14, RED, 0.45]);
     }
+
+    drawGrenades(g, cx, cy, lights);
+  }
+
+  // Grenades: a small orange bead with the same 3-point trail the enemy bullets
+  // use, so the arc reads as a thrown thing and not a slow bullet.
+  function drawGrenades(g, cx, cy, lights) {
+    if (!st) return;
+    for (var i = 0; i < st.grenades.length; i++) {
+      var b = st.grenades[i]; if (!b.alive) continue;
+      var mx = b.x - cx, my = b.y - cy;
+      g.fillStyle = BOOM;
+      g.globalAlpha = 0.16; g.fillRect(b.x3 - cx - 1, b.y3 - cy - 1, 2, 2);
+      g.globalAlpha = 0.32; g.fillRect(b.x2 - cx - 1, b.y2 - cy - 1, 2, 2);
+      g.globalAlpha = 0.55; g.fillRect(b.x1 - cx - 1.5, b.y1 - cy - 1.5, 3, 3);
+      g.globalAlpha = 1;
+      g.fillStyle = BOOM; g.beginPath(); g.arc(mx, my, 3, 0, 6.283); g.fill();
+      // The fuse blinks faster as it runs out — deterministic, straight off ttl.
+      var lit = (b.ttl % (b.ttl < 30 ? 4 : 10)) < 2;
+      g.fillStyle = lit ? BOOM_HI : BOOM_LO;
+      g.beginPath(); g.arc(mx - 0.8, my - 1, 1.2, 0, 6.283); g.fill();
+      lights.push([mx, my, lit ? 30 : 20, BOOM, lit ? 0.7 : 0.4]);
+    }
   }
 
   function hud(W) {
@@ -658,7 +1150,20 @@
     return s;
   }
 
-  var CONTRA = { build: build, step: step, draw: draw, hud: hud, _state: function () { return st; } };
+  var CONTRA = { build: build, step: step, draw: draw, hud: hud,
+    throwGrenade: throwGrenade, stepGrenades: stepGrenades, drawGrenades: drawGrenades,
+    poolRoom: poolRoom, poolCount: poolCount, POOL_CAP: POOL_CAP,
+    /* harness: the pickup effect without the pickup, for screenshots and tests */
+    grant: function (W, slot, kind) {
+      var p = W.players[slot]; if (!st || !p) return false;
+      if (kind === 'h') { p.weapon = 'h'; p.hAmmo = 30; }
+      else if (kind === 'd') spawnDrone(W, p);
+      else if (kind === 't') startHawk(W, p);
+      else if (kind === 'b') p.shieldT = 5;
+      else p.weapon = kind;
+      return true;
+    },
+    _state: function () { return st; } };
   var root = typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this);
   root.CONTRA = CONTRA;
   if (typeof module !== 'undefined' && module.exports) module.exports = CONTRA;

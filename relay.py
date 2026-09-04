@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""relay.py — WebSocket lockstep relay + input recorder for orbit-assault (stdlib only).
+"""relay.py — WebSocket lockstep relay + input recorder for contra-orbit (stdlib only).
 
     python3 relay.py [--port 8902] [--bind 0.0.0.0]
 
@@ -438,7 +438,39 @@ def handle_msg(cl, m):
                                             % (tick, room.max_tick, MAX_AHEAD)})
                 return
             cl.last_tick = tick
-            room.broadcast({"t": "in", "slot": cl.slot, "tick": tick, "byte": byte}, exclude=cl)
+            # Every input is recorded once for resume.  Healthy WebRTC peers
+            # receive it directly; this WebSocket copy is sent only to the
+            # requested fallback slots.  Omitted `to` keeps legacy clients and
+            # the Node regression suite on broadcast semantics.
+            tos = m.get("to")
+            if not isinstance(tos, list):
+                tos = [c.slot for c in room.players() if c is not cl]
+            wanted = set(x for x in tos if isinstance(x, int) and not isinstance(x, bool))
+            frame = {"t": "in", "slot": cl.slot, "tick": tick, "byte": byte}
+            for target in room.players():
+                if target is not cl and target.slot in wanted:
+                    target.send(frame)
+        return
+
+    if t in ("offer", "answer", "ice"):
+        to = m.get("to")
+        if not isinstance(to, int) or isinstance(to, bool) or to == cl.slot:
+            cl.send({"t": "err", "msg": "%s: invalid target" % t}); return
+        with rooms_lock:
+            if cl.room is not room: return
+            target = room.slots[to] if 0 <= to < MAX_PLAYERS else None
+            if target is None:
+                cl.send({"t": "err", "msg": "%s: target unavailable" % t}); return
+            out = {"t": t, "from": cl.slot}
+            if t in ("offer", "answer"):
+                if not isinstance(m.get("sdp"), dict):
+                    cl.send({"t": "err", "msg": "%s: missing sdp" % t}); return
+                out["sdp"] = m["sdp"]
+            else:
+                if not isinstance(m.get("candidate"), dict):
+                    cl.send({"t": "err", "msg": "ice: missing candidate"}); return
+                out["candidate"] = m["candidate"]
+            target.send(out)
         return
     cl.send({"t": "err", "msg": "unknown message type %r" % (t,)})
 
@@ -492,7 +524,7 @@ def snapshot():
 
 
 DASH = """<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="2">
-<title>Orbit Assault relay</title>
+<title>Contra Orbit relay</title>
 <style>body{background:#080A12;color:#ECEAF4;font:13px "Martian Mono",ui-monospace,monospace;padding:28px;max-width:860px;margin:auto}
 h1{font-size:13px;letter-spacing:.18em;text-transform:uppercase;color:#E0616B;margin:0 0 6px}
 .sub{color:#5E6588;font-size:11px;margin-bottom:22px}
@@ -502,7 +534,7 @@ table{border-collapse:collapse;width:100%%}td,th{text-align:left;padding:5px 8px
 td.s{width:2.4em}.c0{color:#6E9CE8}.c1{color:#F5C15C}.c2{color:#6FD0A4}.c3{color:#E58BD6}.c4{color:#FF9A5C}
 .host::after{content:" host";color:#5E6588;font-size:10px}.dim{color:#5E6588}.bad{color:#E0616B}
 .empty{color:#5E6588;padding:18px;border:1px dashed #232A46;border-radius:10px;text-align:center}
-</style><h1>&#9679; Orbit Assault relay</h1><div class="sub">up %(up)s &middot; %(nrooms)d room(s) &middot; %(nplayers)d player(s) &middot; %(idle)d connected, not in a room &middot; <a href="/status.json" style="color:#6E9CE8">json</a></div>
+</style><h1>&#9679; Contra Orbit relay</h1><div class="sub">up %(up)s &middot; %(nrooms)d room(s) &middot; %(nplayers)d player(s) &middot; %(idle)d connected, not in a room &middot; <a href="/status.json" style="color:#6E9CE8">json</a></div>
 %(body)s"""
 
 
@@ -613,7 +645,7 @@ def serve(sock, addr):
 
 def main():
     global LOG_CAP, LOG_SLACK
-    ap = argparse.ArgumentParser(description="orbit-assault lockstep WebSocket relay (stdlib only)")
+    ap = argparse.ArgumentParser(description="contra-orbit lockstep WebSocket relay (stdlib only)")
     ap.add_argument("--port", type=int, default=8902, help="TCP port to listen on (default 8902)")
     ap.add_argument("--bind", default="0.0.0.0", help="address to bind (default 0.0.0.0)")
     ap.add_argument("--log-cap", type=int, default=LOG_CAP,

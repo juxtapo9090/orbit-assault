@@ -343,7 +343,7 @@ async function caseD(port) {
   console.log("\n=== DASHBOARD ===");
   var html = await http(port, "/");
   assert(html.startsWith("HTTP/1.1 200 OK"), "/ must be 200, got: " + html.slice(0, 40));
-  assert(html.indexOf("Orbit Assault relay") > 0, "/ renders the dashboard");
+  assert(html.indexOf("Contra Orbit relay") > 0, "/ renders the dashboard");
   assert(html.indexOf("log ") > 0, "/ shows the log size");
   console.log("  GET /            200 OK, " + html.length + " bytes, shows log size + joinable state");
   var raw = await http(port, "/status.json");

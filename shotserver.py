@@ -38,5 +38,5 @@ class Server(socketserver.ThreadingTCPServer):
 
 
 with Server((args.bind, args.port), H) as srv:
-    print(f"serving {ROOT.name} on http://{args.bind}:{args.port}/test.html", flush=True)
+    print(f"serving {ROOT.name} on http://{args.bind}:{args.port}/orbit.html", flush=True)
     srv.serve_forever()

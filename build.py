@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""build.py — assemble the shippable Orbit Assault from its parts.
+"""build.py — assemble the shippable Contra Orbit from its parts.
 
 Inputs: the core (orbit.src.html) with placeholders, the modules
-(juice / cosmos / light / net / contra), and the levels (contra1..3.txt),
+(juice / cosmos / light / net / contra / input), and the levels (contra1..3.txt),
 each verified by verify_level.py before it is allowed in. Nothing is
 hand-copied between them, so the level that ships is the level that passed.
 
     python3 build.py
 """
 
+import base64
 import pathlib
 import subprocess
 import sys
@@ -22,8 +23,33 @@ MODULES = {
     "/*__LIGHT__*/": HERE / "light.js",
     "/*__NET__*/": HERE / "net.js",
     "/*__CONTRA__*/": HERE / "contra.js",
+    "/*__INPUT__*/": HERE / "input.js",
 }
 LEVELS = ["contra1.txt", "contra2.txt", "contra3.txt"]
+SPRITES = HERE / "sprites" / "out"       # produced by sprites/prep.py from the raw renders
+
+
+def inline_dir(folder, var, what):
+    """Inline every webp in `folder` as a data URI under one JS object. An empty
+    folder is allowed (the game falls back to canvas paths) but it is said out
+    loud, never assumed."""
+    files = sorted(folder.glob("*.webp")) if folder.is_dir() else []
+    if not files:
+        print(f"  ! no {what} in {folder.relative_to(HERE)} — build ships without them")
+        return f"var {var}={{}};"
+    parts = []
+    for p in files:
+        b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+        parts.append('  "%s": "data:image/webp;base64,%s"' % (p.stem, b64))
+        print(f"  + {p.name}: {p.stat().st_size} bytes")
+    return f"var {var}={{\n" + ",\n".join(parts) + "\n};"
+
+
+def load_sprites():
+    """Sheets and stage backgrounds are two bundles on purpose: the sprite cast is
+    all-or-nothing (one bad sheet = whole cast falls back), while a background
+    that fails only loses that one stage's parallax."""
+    return inline_dir(SPRITES, "SPRITE_DATA", "sprites") + "\n" + inline_dir(SPRITES / "bg", "BG_DATA", "backgrounds")
 
 
 def load_levels():
@@ -63,10 +89,14 @@ def main():
     if not verify_all():
         sys.exit("REFUSING TO BUILD — a level failed verification")
 
+    print("sprites:")
+    sprites_js = load_sprites()
+
     src = SRC.read_text()
-    if "/*__LEVELS__*/" not in src:
-        sys.exit("placeholder /*__LEVELS__*/ missing from source")
-    out = src.replace("/*__LEVELS__*/", levels_js)
+    for tok in ("/*__LEVELS__*/", "/*__SPRITES__*/"):
+        if tok not in src:
+            sys.exit(f"placeholder {tok} missing from source")
+    out = src.replace("/*__LEVELS__*/", levels_js).replace("/*__SPRITES__*/", sprites_js)
     for token, path in MODULES.items():
         if token not in src:
             sys.exit(f"placeholder {token} missing from source")

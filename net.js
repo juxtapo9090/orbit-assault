@@ -1,4 +1,4 @@
-/* net.js — lockstep lobby + input exchange for orbit-assault (CONTRACT §6, plus
+/* net.js — lockstep lobby + input exchange for contra-orbit (CONTRACT §6, plus
    mid-game join / "hot swap").
 
    Talks JSON text frames to relay.py over a WebSocket. Dependency-free.
@@ -66,6 +66,11 @@
     var resume = null;       // resume payload once a mid-game join landed
     var logBytes = null, logFrom = 0, logTo = -1, logSlots = SLOTS;
     var joinTick = null, catchingUp = false;
+    // WebRTC is optional: the WebSocket stays authoritative for the input log
+    // and carries only peers which do not have an open data channel.
+    var players = {}, pcs = {}, started = false;
+    var RTC = root.RTCPeerConnection;
+    var ICE = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 
     function fire(list, arg, arg2) {
       for (var i = 0; i < list.length; i++) {
@@ -76,6 +81,42 @@
     function send(obj) {
       if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
     }
+
+    function peerSlots() { var out = []; for (var k in players) if (+k !== slot) out.push(+k); return out; }
+    function rtcSend(to, obj) { send({ t: obj.t, to: to, sdp: obj.sdp, candidate: obj.candidate }); }
+    function p2pUp(s) { var p = pcs[s]; return !!(p && p.dc && p.dc.readyState === "open"); }
+    function wireChannel(s, p, dc) {
+      p.dc = dc;
+      dc.onmessage = function (ev) { var m; try { m = JSON.parse(ev.data); } catch (e) { return; } if (m.t === "in" && typeof m.tick === "number" && typeof m.byte === "number") put(s, m.tick, m.byte); };
+      dc.onclose = function () { p.state = "closed"; };
+      dc.onerror = function () { p.state = "error"; };
+    }
+    function ensurePeer(s) {
+      if (!RTC || s === slot) return null;
+      if (pcs[s]) return pcs[s];
+      var pc = new RTC(ICE), p = pcs[s] = { pc: pc, dc: null, candidates: [], state: "connecting" };
+      pc.onicecandidate = function (ev) { if (ev.candidate) rtcSend(s, { t: "ice", candidate: ev.candidate.toJSON ? ev.candidate.toJSON() : ev.candidate }); };
+      pc.onconnectionstatechange = function () { p.state = pc.connectionState || p.state; if (p.state === "failed") try { pc.close(); } catch (e) {} };
+      pc.ondatachannel = function (ev) { wireChannel(s, p, ev.channel); };
+      return p;
+    }
+    function flushCandidates(p) { var q = p.candidates.splice(0); for (var i = 0; i < q.length; i++) p.pc.addIceCandidate(q[i]).catch(function () {}); }
+    // One deterministic offerer prevents WebRTC offer glare on lobby updates.
+    function offerPeer(s) {
+      if (!RTC || s <= slot) return;
+      var p = ensurePeer(s); if (!p || p.offerStarted) return;
+      p.offerStarted = true;
+      wireChannel(s, p, p.pc.createDataChannel("contra-input", { ordered: false, maxRetransmits: 0 }));
+      p.pc.createOffer().then(function (offer) { return p.pc.setLocalDescription(offer); }).then(function () { rtcSend(s, { t: "offer", sdp: p.pc.localDescription }); }).catch(function () { p.state = "failed"; });
+    }
+    function connectPeers() { if (!started || !RTC) return; var all = peerSlots(); for (var i = 0; i < all.length; i++) offerPeer(all[i]); }
+    function receiveOffer(m) {
+      if (!RTC || typeof m.from !== "number") return;
+      var p = ensurePeer(m.from); if (!p) return;
+      p.pc.setRemoteDescription(m.sdp).then(function () { flushCandidates(p); return p.pc.createAnswer(); }).then(function (answer) { return p.pc.setLocalDescription(answer); }).then(function () { rtcSend(m.from, { t: "answer", sdp: p.pc.localDescription }); }).catch(function () { p.state = "failed"; });
+    }
+    function receiveAnswer(m) { var p = pcs[m.from]; if (p && m.sdp) p.pc.setRemoteDescription(m.sdp).then(function () { flushCandidates(p); }).catch(function () { p.state = "failed"; }); }
+    function receiveIce(m) { if (!RTC || typeof m.from !== "number" || !m.candidate) return; var p = ensurePeer(m.from); if (p.pc.remoteDescription) p.pc.addIceCandidate(m.candidate).catch(function () {}); else p.candidates.push(m.candidate); }
 
     function resetSpans() {
       spans = [];
@@ -135,6 +176,7 @@
       joinTick = head.joinTick;
       catchingUp = true;
       nPlayers = head.nPlayers;
+      started = true;
       resetSpans();
       for (var s = 0; s < SLOTS; s++) {
         var src = (head.spans && head.spans[s]) || [];
@@ -144,6 +186,7 @@
       // to hold what arrives from here on.
       lowTick = logFrom;
       fire(cbStart, { seed: head.seed, nPlayers: nPlayers, mySlot: slot, resume: resumeInfo() });
+      connectPeers();
     }
 
     function resumeInfo() {
@@ -170,12 +213,17 @@
           break;
         case "lobby":
           lobbyState = m;
+          players = {};
+          for (var lp = 0; lp < m.players.length; lp++) players[m.players[lp].slot] = m.players[lp].name;
           fire(cbLobby, { room: m.room, players: m.players, hostSlot: m.hostSlot });
+          connectPeers();
           break;
         case "start":
           nPlayers = m.nPlayers;
+          started = true;
           resetSpans();       // activate frames follow and open the founders' spans
           fire(cbStart, { seed: m.seed, nPlayers: nPlayers, mySlot: slot });
+          connectPeers();
           break;
         case "activate":
           openSpan(m.slot, m.tick);
@@ -189,6 +237,9 @@
         case "pong":
           rttMs = Date.now() - m.ts;
           break;
+        case "offer": receiveOffer(m); break;
+        case "answer": receiveAnswer(m); break;
+        case "ice": receiveIce(m); break;
       }
     }
 
@@ -289,7 +340,12 @@
       pushInput: function (tick, byte) {
         byte = byte & 255;
         put(slot, tick, byte);                 // echo own input locally
-        send({ t: "in", tick: tick, byte: byte });
+        var fallback = peerSlots();
+        for (var i = fallback.length - 1; i >= 0; i--) {
+          var s = fallback[i], p = pcs[s];
+          if (p2pUp(s)) { try { p.dc.send(JSON.stringify({ t: "in", tick: tick, byte: byte })); fallback.splice(i, 1); } catch (e) { p.state = "error"; } }
+        }
+        send({ t: "in", tick: tick, byte: byte, to: fallback });
       },
 
       inputsFor: function (tick) {
@@ -314,14 +370,21 @@
       resumeInfo: function () { return resumeInfo(); },
 
       status: function () {
+        var total = 0, up = 0;
+        for (var ps in players) if (+ps !== slot) { total++; if (p2pUp(+ps)) up++; }
         return { connected: connected, room: room, slot: slot, nPlayers: nPlayers,
                  rttMs: rttMs, stalled: nullStreak > STALL_CALLS,
-                 joinTick: joinTick, catchingUp: catchingUp };
+                 joinTick: joinTick, catchingUp: catchingUp,
+                 transport: !total || !RTC ? "WS" : (up === total ? "P2P" : (up ? "MIX" : "WS")),
+                 p2pPeers: up, peerCount: total };
       },
 
-      close: function () { if (ws) ws.close(); },
+      close: function () { for (var s in pcs) { try { pcs[s].pc.close(); } catch (e) {} } if (ws) ws.close(); },
       _socket: function () { return ws; },     // test hook: kill the underlying socket
       _spans: function () { return spans; },   // test hook
+      _dropP2P: function (s) {                 // test hook: force relay fallback for one peer
+        var p = pcs[s]; if (p && p.dc) p.dc.close();
+      },
       create: create
     };
     return api;

@@ -39,6 +39,8 @@ function makeW(rows, seed, playerX) {
     hurtCalls: 0, scoreTotal: 0, jlog: [],
     hurt: function (p) { if (p.invT > 0) return; W.hurtCalls++; p.invT = 90; },
     score: function (n) { W.scoreTotal += n; },
+    enemies: [], flashes: 0,
+    flash: function () { W.flashes++; },
     J: function () { W.jlog.push(Array.prototype.slice.call(arguments)); },
     C: function () {}, L: function () {}
   };
@@ -170,6 +172,54 @@ assert(a !== c, 'different seed -> different state');
   try { CONTRA.draw(g, W.camX(), 0, lights, W); } catch (e) { threw = e; }
   assert(!threw, 'draw() ran without throwing' + (threw ? ': ' + threw.message : '') + ', ' + calls + ' ctx calls');
   assert(lights.length > 5 && lights.every(function (l) { return l.length === 5 && typeof l[3] === 'string'; }), 'draw pushed ' + lights.length + ' well-formed lights');
+})();
+
+// ---- 7. grenades: the arc, the fuse, the blast ----
+(function () {
+  // Thrown flat off the floor: it must fall, hit the floor, and go off there.
+  var W = makeW(MAP2, 3, 3 * TS); CONTRA.build(W);
+  var gr = CONTRA.throwGrenade(W, 4 * TS, 6 * TS, 180, -220, 0);
+  assert(!!gr && gr.alive, 'throwGrenade returned a live slot');
+  var apex = gr.y, i;
+  for (i = 0; i < 20; i++) { tick(W); apex = Math.min(apex, gr.y); }
+  assert(apex < 6 * TS - 15, 'grenade arced up ' + (6 * TS - apex).toFixed(1) + 'px before falling');
+  for (i = 0; i < 120 && gr.alive; i++) tick(W);
+  assert(!gr.alive, 'grenade detonated (ground contact) at tick ' + i);
+  assert(W.flashes === 1, 'blast asked for exactly one screen flash (' + W.flashes + ')');
+  assert(sfxCount(W, 'bossDie') === 1, 'blast played the boom once');
+
+  // Pool: the next throw reuses the dead slot, it does not grow the array.
+  var n0 = CONTRA._state().grenades.length;
+  CONTRA.throwGrenade(W, 4 * TS, 6 * TS, 0, 0, 0);
+  assert(CONTRA._state().grenades.length === n0, 'dead grenade slot reused, pool still ' + n0);
+})();
+
+// ---- 8. blast radius: the boundary is really at 5 tiles ----
+(function () {
+  var W = makeW(MAP2, 3, 3 * TS); CONTRA.build(W);
+  // Blast centre x=96. Walkers are 14 wide, so centre = x+7: one at 76px out
+  // (inside 80), one at 84px out (outside). Eight pixels decide it.
+  var near = { alive: true, x: 165, y: 7 * TS, w: 14, h: 14 };
+  var far = { alive: true, x: 173, y: 7 * TS, w: 14, h: 14 };
+  W.enemies.push(near, far);
+  var r = CONTRA._state().runners[0];
+  r.x = 8 * TS; r.y = 7 * TS;                                        // 2 tiles away
+  var gr = CONTRA.throwGrenade(W, 6 * TS, 7 * TS + 7, 0, 0, 0);
+  gr.ttl = 1; tick(W);
+  assert(!gr.alive, 'fuse ran out, grenade gone');
+  assert(!r.alive, 'runner inside the blast died');
+  assert(!near.alive, 'walker 76px out died');
+  assert(far.alive, 'walker 84px out survived — the radius is a radius');
+})();
+
+// ---- 9. blast breaks a turret's shield (bullets cannot) ----
+(function () {
+  var W = makeW(MAP, 3, 17 * TS); CONTRA.build(W);
+  var t = CONTRA._state().turrets[0];
+  assert(!t.open, 'turret starts closed');
+  var gr = CONTRA.throwGrenade(W, t.x, t.y, 0, 0, 0);
+  gr.ttl = 1; tick(W);
+  assert(!t.alive, 'closed turret died to a 5-damage blast (hp was 3)');
 })();
 
 console.log(fails ? ('\n' + fails + ' FAILED') : '\nALL GREEN');

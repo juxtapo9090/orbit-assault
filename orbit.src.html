@@ -1,5 +1,5 @@
 <meta charset="utf-8">
-<title>Orbit Assault</title>
+<title>Purge Protocol</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Martian+Mono:wght@400;500;600&display=swap">
@@ -130,13 +130,28 @@ button.ghost:hover{color:var(--ink);border-color:var(--ink-faint);background:rgb
   border-radius:6px;padding:8px 14px}
 .win .big em{font-style:normal;color:var(--rise)}
 
-/* ---------- touch pad ---------- */
+/* ---------- touch pad ----------
+   Shown only on a touch-capable device (INPUT sets body.touch), hidden again the
+   moment a gamepad appears (body.gamepad) — a pad on a tablet makes the overlay
+   nothing but fingerprints over the game. */
 .pad{display:none}
-@media (pointer:coarse){
-  .pad{display:grid;grid-template-columns:1fr 1fr 1fr 1.3fr 1.3fr;gap:9px;touch-action:none;
-       user-select:none;-webkit-user-select:none}
-  .hint{display:none}
-}
+body.touch .pad{display:flex;align-items:center;justify-content:space-between;gap:14px;
+  touch-action:none;user-select:none;-webkit-user-select:none}
+body.touch .hint{display:none}
+body.touch.gamepad .pad{display:none}
+.dpad{position:relative;width:132px;height:132px;flex:0 0 auto;border-radius:50%;
+  background:radial-gradient(60% 60% at 50% 42%,var(--panel-2),var(--panel));
+  border:1px solid var(--line);border-bottom-width:3px;touch-action:none}
+.dpad.on{border-color:var(--rise);box-shadow:0 0 18px -4px rgba(245,193,92,.6)}
+.dpad span{position:absolute;color:var(--ink-faint);font-size:13px;line-height:1;
+  pointer-events:none}          /* labels never eat a touch — hit target is the circle */
+.dpad .u{top:9px;left:50%;transform:translateX(-50%)}
+.dpad .d{bottom:9px;left:50%;transform:translateX(-50%)}
+.dpad .l{left:9px;top:50%;transform:translateY(-50%)}
+.dpad .r{right:9px;top:50%;transform:translateY(-50%)}
+.dpad::after{content:"";position:absolute;left:50%;top:50%;width:30px;height:30px;
+  margin:-15px 0 0 -15px;border-radius:50%;border:1px solid var(--line);pointer-events:none}
+.tbtns{display:grid;grid-template-columns:1fr 1fr;gap:9px;flex:1 1 auto;max-width:240px}
 .pad button{-webkit-tap-highlight-color:transparent;touch-action:none;
   font-family:"Martian Mono",ui-monospace,monospace;font-size:11px;letter-spacing:.04em;
   text-transform:uppercase;background:var(--panel);color:var(--ink-soft);
@@ -144,6 +159,7 @@ button.ghost:hover{color:var(--ink);border-color:var(--ink-faint);background:rgb
   padding:19px 4px;cursor:pointer}
 .pad button.jump{background:var(--panel-2);color:var(--ink);font-weight:600}
 .pad button.fire{background:#2A1A22;color:#FFC4C9;font-weight:600}
+.pad button.bomb{background:#2A1C10;color:#FFC98A;font-weight:600;font-size:15px}
 .pad button.on{background:var(--rise);border-color:var(--rise);color:#141008}
 
 .hint{display:flex;flex-wrap:wrap;gap:5px 15px;justify-content:center;
@@ -156,28 +172,30 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
 
 <div class="shell">
   <div class="bar">
-    <span class="brand">Orbit Assault</span>
+    <span class="brand">Purge Protocol</span>
     <div class="stats">
       <span class="stat"><i>stage</i><b id="hLevel">1</b></span>
       <span class="stat"><i>light</i><b id="hLight">&bull;&bull;</b></span>
       <span class="stat"><i>lives</i><b id="hLives">3</b></span>
       <span class="stat"><i>gun</i><b id="hGun">N</b></span>
+      <span class="stat"><i>bomb</i><b id="hBomb">&#128163;2</b></span>
       <span class="stat"><i>score</i><b id="hScore">0</b></span>
       <span class="stat"><i>boss</i><b id="hBoss">&mdash;</b></span>
       <span class="stat"><i>net</i><b id="hNet" class="off">solo</b></span>
+      <span class="stat"><i>fps</i><b id="hFps">60fps</b></span>
     </div>
   </div>
 
   <div class="stagebox">
     <canvas id="game" width="960" height="540" tabindex="0"
-      aria-label="Orbit Assault - a 2D run-and-gun. Arrows move, space jumps, X fires."></canvas>
+      aria-label="Purge Protocol - a 2D run-and-gun. Arrows move, space jumps, X fires."></canvas>
 
     <div class="overlay" id="ovTitle">
-      <p class="tag" id="tagLine">&#9654; Run and gun, in orbit</p>
-      <h1>Orbit <em>Assault</em></h1>
+      <p class="tag" id="tagLine">&#9654; Run and gun, for the Emperor</p>
+      <h1>Purge <em>Protocol</em></h1>
       <div class="rule"></div>
       <p>Same sky, same light. Now it shoots back.<br><b>Up to five, one couch, one LAN.</b><br>Infinite lives &mdash; dying only costs you your gun.</p>
-      <p class="keys">&larr; &rarr; move &middot; space jump &middot; X / K fire &middot; &uarr; &darr; aim &middot; &darr; on ground = prone<br>
+      <p class="keys">&larr; &rarr; move &middot; space jump &middot; X / K fire &middot; &uarr; &darr; aim &middot; &darr; on ground = prone &middot; C bomb<br>
          shift run &middot; esc pause &middot; R restart &middot; M mute</p>
       <div class="row">
         <input id="inName" class="wide" placeholder="your name" maxlength="12">
@@ -211,7 +229,7 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
     </div>
 
     <div class="overlay win" id="ovWin" hidden>
-      <p class="tag" id="winTag">Orbit complete</p>
+      <p class="tag" id="winTag">Purge complete</p>
       <h1 id="winH1">Beacon <em>reached</em></h1>
       <div class="rule"></div>
       <p class="big" id="winStats"></p>
@@ -221,15 +239,21 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
   </div>
 
   <div class="pad">
-    <button type="button" data-hold="l" aria-label="Move left">&#9664;</button>
-    <button type="button" data-hold="r" aria-label="Move right">&#9654;</button>
-    <button type="button" data-hold="u" aria-label="Aim up">&#9650;</button>
-    <button type="button" data-hold="j" class="jump" aria-label="Jump">Jump</button>
-    <button type="button" data-hold="f" class="fire" aria-label="Fire">Fire</button>
+    <div class="dpad" data-dpad aria-label="Move and aim">
+      <span class="u">&#9650;</span><span class="d">&#9660;</span>
+      <span class="l">&#9664;</span><span class="r">&#9654;</span>
+    </div>
+    <div class="tbtns">
+      <button type="button" data-hold="s" aria-label="Run">Run</button>
+      <button type="button" data-hold="j" class="jump" aria-label="Jump">Jump</button>
+      <button type="button" data-hold="b" class="bomb" aria-label="Bomb">&#128163;</button>
+      <button type="button" data-hold="f" class="fire" aria-label="Fire">Fire</button>
+    </div>
   </div>
   <p class="hint">
     <span><kbd>&larr;</kbd><kbd>&rarr;</kbd> move</span><span><kbd>space</kbd> jump</span>
-    <span><kbd>X</kbd> fire</span><span><kbd>&uarr;</kbd><kbd>&darr;</kbd> aim / prone</span>
+    <span><kbd>X</kbd> fire</span><span><kbd>C</kbd> bomb</span>
+    <span><kbd>&uarr;</kbd><kbd>&darr;</kbd> aim / prone</span>
     <span><kbd>shift</kbd> run</span><span><kbd>esc</kbd> pause</span>
   </p>
 </div>
@@ -249,6 +273,49 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
 <script>
 /*__CONTRA__*/
 </script>
+<script>
+/*__INPUT__*/
+</script>
+<script>
+/* Sprites: build.py inlines sprites/out/*.webp here as data URIs (prepped from the
+   raw renders by sprites/prep.py). Everything below is presentation only — the sim
+   never reads SPRITES. */
+/*__SPRITES__*/
+var SPRITES=(function(){
+  var S={loaded:false,player:[],playerWalk:[],playerAim:[],total:0,done:0};
+  var names=Object.keys(SPRITE_DATA); S.total=names.length;
+  if(!S.total){ console.warn("no sprites inlined — canvas-path fallback"); return S; }
+  function one(){ S.done++; if(S.done===S.total) S.loaded=true; }
+  names.forEach(function(n){
+    var im=new Image();
+    im.onload=one;
+    /* one missing sheet = whole thing stays on the fallback; never half a cast */
+    im.onerror=function(){ console.error("sprite failed to decode: "+n); };
+    im.src=SPRITE_DATA[n];
+    /* player-N = the pose sheet, player-N-walk / -aim the animation sheets beside it */
+    var m=/^player-(\d)(?:-(walk|aim))?$/.exec(n);
+    if(m) (m[2]==="walk"?S.playerWalk:m[2]==="aim"?S.playerAim:S.player)[+m[1]]=im;
+    else S[n.replace(/-(\w)/g,function(_,c){ return c.toUpperCase(); })]=im;
+  });
+  return S;
+})();
+/* Stage backgrounds: each one stands alone. A layer that fails to decode is
+   simply not drawn (the cosmos stars are still behind everything); it never
+   drags the sprite cast down with it. BG.far[n] / BG.near[n], n = stage 0..3. */
+var BG=(function(){
+  var B={far:[],near:[]};
+  if(typeof BG_DATA==="undefined") return B;
+  Object.keys(BG_DATA).forEach(function(n){
+    var m=/^bg-stage(\d)-(far|near)$/.exec(n); if(!m) return;
+    var im=new Image();
+    im.onload=function(){ im.ok=true; };
+    im.onerror=function(){ console.error("background failed to decode: "+n); };
+    im.src=BG_DATA[n];
+    B[m[2]][+m[1]-1]=im;
+  });
+  return B;
+})();
+</script>
 
 <script>
 (function(){
@@ -267,6 +334,22 @@ var LEVEL=LEVELS[0];
 
 var TS=16, MAP_W=0, MAP_H=0, tiles=[];
 var VW=480,VH=270,SCALE=2,cam={x:0,y:0};
+/* ---- auto quality ----
+   SCALE is the only thing here that is not a constant: it is device pixels per
+   logical pixel, and it is the single biggest lever on render cost, because
+   everything downstream (the light buffer, the bloom buffers, every fill) is
+   sized off it. Tier is measured once, two seconds into the first real play, and
+   then LOCKED for the session — a tier that re-decides mid-fight would drop
+   bloom exactly when a boss explosion made the frame expensive, which is the one
+   moment you want it. Render only: the sim never reads any of this. */
+var QUALITY=2, Q_SCALE=[1,1.5,2], Q_CHAR=["L","M","H"];
+var qLocked=false, qFrames=0, qStart=0, qAvgFps=0, Q_WINDOW=120, Q_WARMUP=30;
+/* Q_WARMUP is not padding, it is a measured correction. The first half-second of
+   real play runs at ~54fps on a machine that then holds a flat 60 — audio context
+   spinning up, the first gradient of every colour being built, the level's tiles
+   touched for the first time. Measuring from frame 0 folds that into the average,
+   and on a loaded machine it was enough to lock a 60fps PC into Medium for the
+   whole session. So: throw away 30 frames, THEN measure the contract's 120. */
 /* cam = the shared, deterministic anchor (sim: leash, spawners, culling).
    view = what THIS browser draws, centred on the local player. Never let view
    touch anything the sim reads. */
@@ -305,7 +388,17 @@ function spikeAt(tx,ty){
 /* ================= tuning ================= */
 var P={gRise:1250,gFall:2900,jVel:430,sBonus:0.18,coyote:6,buffer:6,
        maxRun:250,walkFrac:0.56,accel:1100,friction:1500,airCtl:0.70,termVel:900};
-var GUN={ n:{cd:9,  speed:430}, s:{cd:12, speed:400}, l:{cd:22, speed:520} };
+var GUN={ n:{cd:9,  speed:430}, s:{cd:12, speed:400}, l:{cd:22, speed:520}, h:{cd:14, speed:430} };
+/* Homing missiles are a magazine, not a gun you keep: H_SHOTS rounds, then the
+   normal gun comes back on its own. The steering lives in CONTRA (everything a
+   missile can chase lives there); the core only knows how to launch one. */
+var H_SHOTS=30;
+/* Bombs. Two per life is enough to open one bad room and not enough to trivialise
+   a boss; the cap at five stops a coin-rich stretch turning into an arsenal. The
+   cooldown is what keeps a held button from emptying the pouch in three frames —
+   the throw is edge-triggered too, so this is belt AND braces. */
+var BOMB_START=2, BOMB_MAX=5, BOMB_CD=30;
+var BOMB_VX=180, BOMB_VY=-220;
 /* Input delay, in ticks. 3 was a real-LAN number; over WireGuard through a VPS a
    45ms round trip eats all of it and every peer micro-stalls. Chosen from the
    measured rtt at launch, and it climbs on its own if the line gets worse.
@@ -331,11 +424,32 @@ var intensity=0, musicOn=false, track="contra", muted=false;
 var STATE="title", prevState="title";
 var trans={t:0,dir:0};
 var tclock=0;
+var flashT=0, flashCol="#FFE0A8";     // render-only screen flash, decays in draw()
 
 function J(fn,a,b,c,d){ try{ if(window.JUICE&&JUICE[fn]) return JUICE[fn](a,b,c,d); }catch(e){} }
 function C(fn,a,b,c,d,e){ try{ if(window.COSMOS&&COSMOS[fn]) return COSMOS[fn](a,b,c,d,e); }catch(err){} }
 function L(fn,a,b,c,d,e){ try{ if(window.LIGHT&&LIGHT[fn]) return LIGHT[fn](a,b,c,d,e); }catch(err){} }
-function K(fn,a,b,c,d,e){ if(window.CONTRA&&CONTRA[fn]) return CONTRA[fn](a,b,c,d,e); }
+
+/* Set the tier. Changing SCALE resizes the backing store, which wipes the 2D
+   context state — harmless, draw() re-sets the transform every frame — and forces
+   LIGHT to rebuild its buffers at the new device size. COSMOS works in logical
+   coords, so it does not care. CSS keeps the canvas the same size on screen; only
+   the resolution behind it moves. */
+/* The thresholds, alone and testable. Machine speed decides the input; this
+   decides nothing else. */
+function pickTier(fps){ return fps>=50?2:(fps>=35?1:0); }
+function applyQuality(q){
+  q=Math.max(0,Math.min(2,q|0));
+  QUALITY=q;
+  var s=Q_SCALE[q];
+  if(s!==SCALE){
+    SCALE=s;
+    canvas.width=Math.round(VW*SCALE); canvas.height=Math.round(VH*SCALE);
+    L("init",canvas,SCALE); L("resize",VW,VH);
+  }
+  L("setQuality",q);
+}
+function K(fn,a,b,c,d,e,f){ if(window.CONTRA&&CONTRA[fn]) return CONTRA[fn](a,b,c,d,e,f); }
 
 /* The world object handed to CONTRA. One object, mutated in place, so the
    module sees live state without copies. */
@@ -343,11 +457,18 @@ var W={
   TS:TS, MAP_W:0, MAP_H:0, tiles:null,
   solidAt:solidAt, oneWayAt:oneWayAt,
   players:players, bullets:bullets,
+  /* The core's own walkers, live array — a blast has to be able to reach them
+     too. buildEntities() truncates it in place, never reassigns, or CONTRA would
+     be holding last level's ghosts. */
+  enemies:enemies,
   rng:rng, seed:0, tick:0,
   cam:cam, camX:function(){ return cam.x; },
   VW:VW, VH:VH,
   hurt:function(p){ hurt(p); },
   score:function(n,p){ stats.score+=n; if(p) p.score+=n; },
+  /* Presentation only — never read by the sim, so a peer that skips a frame of
+     flash still agrees on every number that matters. */
+  flash:function(power,col){ flashT=Math.max(flashT,power||0.6); flashCol=col||"#FFE0A8"; },
   J:J, C:C, L:L,
   levelDone:false, tclock:0
 };
@@ -369,7 +490,7 @@ function loadLevel(n){
 }
 
 function buildEntities(){
-  coins=[];enemies=[];lumes=[];coinTotal=0;bullets.length=0;
+  coins=[];enemies.length=0;lumes=[];coinTotal=0;bullets.length=0;
   for(var y=0;y<MAP_H;y++)for(var x=0;x<MAP_W;x++){
     var c=tiles[y][x];
     if(c==="P"){ spawn={x:x*TS,y:y*TS}; }
@@ -385,11 +506,12 @@ function makePlayer(slot,name){
   /* alive:false + dead:true while dormant — CONTRA and every loop already skip
      those, so no enemy ever aims at an empty chair. */
   return {slot:slot,name:name||("P"+(slot+1)),x:0,y:0,w:11,h:15,vx:0,vy:0,onGround:false,face:1,
-    aimX:1,aimY:0,prone:false,dead:true,deadT:0,light:2,lives:3,weapon:"n",alive:false,
+    aimX:1,aimY:0,prone:false,dead:true,deadT:0,light:2,lives:3,weapon:"n",hAmmo:0,alive:false,
     color:SLOT_COLORS[slot%SLOT_COLORS.length],
     active:false,
-    invT:0,dropT:0,sq:0,coyoteT:0,bufferT:0,rising:false,wasAir:0,fireCd:0,prevJ:false,prevDrop:false,
-    trail:[],arcPts:[],score:0,inp:{l:0,r:0,u:0,d:0,j:0,f:0,s:0}};
+    invT:0,shieldT:0,dropT:0,sq:0,coyoteT:0,bufferT:0,rising:false,wasAir:0,fireCd:0,prevJ:false,prevDrop:false,
+    bombs:BOMB_START,bombCd:0,prevB:false,
+    trail:[],arcPts:[],score:0,inp:{l:0,r:0,u:0,d:0,j:0,f:0,s:0,b:0}};
 }
 /* Five slots always exist and are simulated from tick 0. An unclaimed slot is
    DORMANT: frozen, invisible, ignored by the camera and by every enemy, input
@@ -434,7 +556,7 @@ function applyActivations(){
 function placePlayer(p,x,y){
   p.x=x;p.y=y;p.vx=0;p.vy=0;p.onGround=false;
   p.dead=false;p.deadT=0;p.coyoteT=0;p.bufferT=0;p.rising=false;p.wasAir=0;
-  p.light=2;p.invT=0;p.dropT=0;p.sq=0;p.prone=false;p.h=15;p.fireCd=0;
+  p.light=2;p.invT=0;p.shieldT=0;p.dropT=0;p.sq=0;p.prone=false;p.h=15;p.fireCd=0;
   p.trail.length=0;p.arcPts.length=0;
 }
 function resetPlayers(){
@@ -449,50 +571,36 @@ function resetPlayers(){
 function restartAll(){
   tick=0; loadLevel(0);stats.deaths=0;stats.time=0;stats.score=0;
   banner="";bannerT=0;trans.dir=0;trans.t=0;intensity=0;
-  for(var i=0;i<players.length;i++){ var q=players[i]; q.lives=3; q.alive=q.active; q.dead=!q.active; q.weapon="n"; q.score=0; }
+  bgStage=-1; bgPrev=-1; bgFadeT=0;
+  for(var i=0;i<players.length;i++){ var q=players[i]; q.lives=3; q.alive=q.active; q.dead=!q.active; q.weapon="n"; q.hAmmo=0; q.shieldT=0; q.score=0; q.bombs=BOMB_START; q.bombCd=0; q.prevB=false; }
   resetPlayers();
 }
 
-/* ================= input ================= */
-var keys={},canvas=document.getElementById("game");
-var CODES={ArrowLeft:"l",KeyA:"l",ArrowRight:"r",KeyD:"r",Space:"j",KeyW:"j",ArrowUp:"u",
-           KeyX:"f",KeyK:"f",KeyJ:"f",
-           ShiftLeft:"s",ShiftRight:"s",ArrowDown:"d",KeyS:"d",KeyR:"reset",
-           Escape:"pause",KeyP:"pause",KeyM:"mute"};
-window.addEventListener("keydown",function(e){
-  var k=CODES[e.code]; if(!k) return;
-  if(e.target&&e.target.tagName==="INPUT") return;
-  if(e.code==="Space"||e.code.indexOf("Arrow")===0) e.preventDefault();
-  if(k==="reset"){ if((STATE==="play"||STATE==="pause")&&!netOn()) { closePause(); restartAll(); } return; }
-  if(k==="pause"){ togglePause(); return; }
-  if(k==="mute"){ setMuted(!muted); return; }
-  keys[k]=true;
-},{passive:false});
-window.addEventListener("keyup",function(e){ var k=CODES[e.code]; if(k) keys[k]=false; });
-window.addEventListener("blur",function(){ keys={}; });
-document.addEventListener("visibilitychange",function(){
-  if(document.hidden){ keys={}; if(!netOn()) openPause(); }
-});
-document.querySelectorAll(".pad button[data-hold]").forEach(function(btn){
-  var k=btn.dataset.hold;
-  function press(e){
-    e.preventDefault(); keys[k]=true;btn.classList.add("on");
-    if(btn.setPointerCapture&&e.pointerId!=null){try{btn.setPointerCapture(e.pointerId);}catch(err){}}
+/* ================= input =================
+   Keyboard, gamepad and touch all live in input.js now — one merged read, one
+   byte. The core only says what "reset"/"pause"/"mute" mean, because those are
+   states, not directions. */
+var canvas=document.getElementById("game");
+INPUT.init({
+  onAction:function(name){
+    if(name==="reset"){ if((STATE==="play"||STATE==="pause")&&!netOn()){ closePause(); restartAll(); } return; }
+    if(name==="pause"){ togglePause(); return; }
+    if(name==="mute"){ setMuted(!muted); }
   }
-  function rel(e){ if(e)e.preventDefault(); keys[k]=false; btn.classList.remove("on"); }
-  btn.addEventListener("pointerdown",press);
-  btn.addEventListener("pointerup",rel);
-  btn.addEventListener("pointercancel",rel);
-  btn.addEventListener("lostpointercapture",rel);
-  btn.addEventListener("contextmenu",function(e){e.preventDefault();});
+});
+window.addEventListener("blur",function(){ INPUT.clear(); });
+document.addEventListener("visibilitychange",function(){
+  if(document.hidden){ INPUT.clear(); if(!netOn()) openPause(); }
 });
 
-/* Input byte: L=1 R=2 U=4 D=8 J=16 F=32 S=64 (CONTRACT §6) */
+/* Input byte: L=1 R=2 U=4 D=8 J=16 F=32 S=64 B=128 (CONTRACT §6 + bombs).
+   All eight bits are spoken for now; the byte itself did not change size. */
 function localByte(){
-  return (keys.l?1:0)|(keys.r?2:0)|(keys.u?4:0)|(keys.d?8:0)|(keys.j?16:0)|(keys.f?32:0)|(keys.s?64:0);
+  var k=INPUT.get();
+  return (k.l?1:0)|(k.r?2:0)|(k.u?4:0)|(k.d?8:0)|(k.j?16:0)|(k.f?32:0)|(k.s?64:0)|(k.b?128:0);
 }
 function decode(p,b){
-  var i=p.inp; i.l=b&1; i.r=(b>>1)&1; i.u=(b>>2)&1; i.d=(b>>3)&1; i.j=(b>>4)&1; i.f=(b>>5)&1; i.s=(b>>6)&1;
+  var i=p.inp; i.l=b&1; i.r=(b>>1)&1; i.u=(b>>2)&1; i.d=(b>>3)&1; i.j=(b>>4)&1; i.f=(b>>5)&1; i.s=(b>>6)&1; i.b=(b>>7)&1;
 }
 
 /* ================= net glue ================= */
@@ -504,7 +612,7 @@ var ovPause=document.getElementById("ovPause");
 var btnMute=document.getElementById("btnMute");
 function openPause(){
   if(STATE!=="play") return;
-  prevState=STATE; STATE="pause"; keys={};
+  prevState=STATE; STATE="pause"; INPUT.clear();
   document.getElementById("pauseMsg").textContent=netOn()?"Others keep playing. Your mote stands still.":"The dark waits. It is patient.";
   ovPause.hidden=false;
 }
@@ -601,6 +709,11 @@ function touchingSpike(p){
 
 function hurt(p){
   if(p.dead||p.invT>0||!p.alive) return;
+  if(p.shieldT>0){
+    p.shieldT=0; p.invT=0.5;
+    J("sfx","pickup"); J("burst",p.x+p.w/2,p.y+p.h/2,"#6EE7F0",18); J("shake",0.3);
+    return;
+  }
   p.light--;
   if(p.light<=0){ kill(p); return; }
   p.invT=1.3;
@@ -611,7 +724,7 @@ function hurt(p){
 function kill(p){
   if(p.dead||!p.alive) return;
   p.dead=true;p.deadT=0;stats.deaths++;
-  p.weapon="n";
+  p.weapon="n"; p.hAmmo=0; p.bombs=BOMB_START; p.bombCd=0; p.prevB=false;
   J("sfx","hurt"); J("shake",0.85);
   J("burst",p.x+p.w/2,p.y+p.h/2,"#D9544D",22);
   if(!INFINITE_LIVES){ p.lives--; if(p.lives<=0) p.alive=false; }
@@ -659,14 +772,14 @@ function bumpBlock(tx,ty){
 function reachFlag(){
   J("sfx","goal"); J("burst",flag.x+8,flag.y+8,"#F0B04A",34);
   if(curLevel+1<LEVELS.length){
-    STATE="transit"; trans.dir=1; trans.t=0; keys={};
+    STATE="transit"; trans.dir=1; trans.t=0; INPUT.clear();
   } else {
     showEnd(true);
   }
 }
 function showEnd(won){
   STATE="win";
-  document.getElementById("winTag").textContent=won?"Orbit complete":"Signal lost";
+  document.getElementById("winTag").textContent=won?"Purge complete":"Signal lost";
   document.getElementById("winH1").innerHTML=won?"Beacon <em>reached</em>":"All motes <em>dark</em>";
   var html="<span><em>"+stats.score+"</em> pts</span><span><em>"+stats.deaths+"</em> falls</span>"+
            "<span><em>"+stats.time.toFixed(1)+"</em>s</span>";
@@ -688,9 +801,13 @@ function fire(p){
   var len=Math.sqrt(ax*ax+ay*ay), dx=ax/len, dy=ay/len;
   var ox=p.x+p.w/2+dx*8, oy=p.y+(p.prone?p.h*0.5:p.h*0.4)+dy*6;
   function spawnB(vx,vy,kind){
-    bullets.push({x:ox,y:oy,vx:vx,vy:vy,r:kind==="l"?3:2,owner:p.slot,kind:kind,alive:true,ttl:90});
+    K("poolRoom",W);            /* the cap: full pool recycles its oldest shot first */
+    bullets.push({x:ox,y:oy,vx:vx,vy:vy,r:kind==="l"?3:2,owner:p.slot,kind:kind,alive:true,ttl:kind==="h"?150:90});
   }
-  if(p.weapon==="s"){
+  if(p.weapon==="h"){
+    spawnB(dx*gun.speed,dy*gun.speed,"h"); J("sfx","laser");
+    p.hAmmo--; if(p.hAmmo<=0){ p.weapon="n"; p.hAmmo=0; }
+  } else if(p.weapon==="s"){
     var a0=Math.atan2(dy,dx);
     for(var k=-1;k<=1;k++){ var a=a0+k*0.30; spawnB(Math.cos(a)*gun.speed,Math.sin(a)*gun.speed,"s"); }
     J("sfx","spread");
@@ -701,6 +818,17 @@ function fire(p){
   }
   p.vx-=dx*(p.onGround?18:10);
   J("burst",ox,oy,"#FFE9B8",2);
+}
+
+/* One bomb, thrown forward on an arc. Edge-triggered on the b bit: hold it down
+   and you get exactly one grenade, which is the difference between a weapon and
+   a fire hose. The arc, the fuse and the blast belong to CONTRA — everything a
+   blast can touch already lives there. */
+function throwBomb(p){
+  p.bombs--; p.bombCd=BOMB_CD;
+  var ox=p.x+p.w/2+p.face*6, oy=p.y+(p.prone?p.h*0.5:p.h*0.35);
+  K("throwGrenade",W,ox,oy,p.face*BOMB_VX,BOMB_VY,p.slot);
+  J("burst",ox,oy,"#FF7A2A",4);
 }
 function stepBullets(){
   for(var i=0;i<bullets.length;i++){
@@ -760,8 +888,10 @@ function stepPlayer(p){
   }
 
   if(p.invT>0) p.invT-=DT;
+  if(p.shieldT>0) p.shieldT-=DT;
   if(p.dropT>0) p.dropT-=DT;
   if(p.fireCd>0) p.fireCd--;
+  if(p.bombCd>0) p.bombCd--;
   if(inp.j&&!p.prevJ) p.bufferT=P.buffer;
   p.prevJ=!!inp.j;
 
@@ -791,6 +921,8 @@ function stepPlayer(p){
   if(p.vy>P.termVel) p.vy=P.termVel;
 
   if(inp.f&&p.fireCd<=0) fire(p);
+  if(inp.b&&!p.prevB&&p.bombs>0&&p.bombCd<=0) throwBomb(p);
+  p.prevB=!!inp.b;
 
   var impactV=p.vy;
   moveX(p,p.vx*DT);
@@ -832,12 +964,15 @@ function stepPlayer(p){
   if(p.y>MAP_H*TS+40){ kill(p); return; }
   if(touchingSpike(p)){ hurt(p); if(p.dead) return; }
 
-  /* coins */
+  /* coins — ammo now, not just a number. Every existing 'o' on every level
+     became a bomb drop the moment this line changed; no level file was touched.
+     Still worth the 100 points, because the score is the run's story. */
   for(var i=0;i<coins.length;i++){
     var c=coins[i]; if(c.got) continue;
     if(Math.abs(c.x-(p.x+p.w/2))<11&&Math.abs(c.y-(p.y+p.h/2))<13){
       c.got=true; W.score(100,p);
-      J("sfx","coin"); J("burst",c.x,c.y,"#F0B04A",9);
+      p.bombs=Math.min(p.bombs+1,BOMB_MAX);
+      J("sfx","coin"); J("burst",c.x,c.y,"#FF8C3A",9);
     }
   }
   for(i=0;i<lumes.length;i++){
@@ -971,6 +1106,54 @@ var PAL=[
 function pal(){ return PAL[curLevel%PAL.length]; }
 window.pal=pal;
 
+/* ================= parallax stage backgrounds =================
+   Render only. Stage is picked by GLOBAL column — the run is three levels of
+   240/224/240 columns, so counting from the start of the run puts a stage
+   line inside each level (col 200, 400, 600) and every one of the four
+   backdrops gets its turn. Far scrolls at 0.3x, near at 0.6x, the action at 1x.
+   The near layers are opaque paintings, not cut-outs, so the near layer is
+   laid over the far at part alpha and the pair is veiled toward the void, or a
+   white Tau corridor would drown a bloom-lit firefight. */
+var STAGE_COLS=200, BG_FAR=0.3, BG_NEAR=0.6, BG_NEAR_A=0.55, BG_VEIL=0.38, BG_FADE=2.0;
+var bgStage=-1, bgPrev=-1, bgFadeT=0;
+function levelColOffset(){
+  var off=0;
+  for(var i=0;i<curLevel;i++){ var w=0; for(var r=0;r<LEVELS[i].length;r++) if(LEVELS[i][r].length>w) w=LEVELS[i][r].length; off+=w; }
+  return off;
+}
+function stageAt(worldX){
+  var col=levelColOffset()+worldX/TS;
+  return Math.max(0,Math.min(3,Math.floor(col/STAGE_COLS)));
+}
+function drawBgLayer(img,cx,cy,k,alpha){
+  if(!img||!img.ok) return;
+  var w=img.width*VH/img.height;                        /* fit height, tile width */
+  var x=-((cx*k)%w); if(x>0) x-=w;
+  g.globalAlpha=alpha;
+  for(;x<VW;x+=w) g.drawImage(img,x,0,w,VH);
+  g.globalAlpha=1;
+}
+function drawStage(n,cx,cy,alpha){
+  drawBgLayer(BG.far[n],cx,cy,BG_FAR,alpha);
+  drawBgLayer(BG.near[n],cx,cy,BG_NEAR,alpha*BG_NEAR_A);
+}
+function drawBackground(cx,cy){
+  var s=stageAt(cx+VW/2);
+  if(s!==bgStage){
+    if(bgStage>=0){ bgPrev=bgStage; bgFadeT=BG_FADE; }
+    bgStage=s;
+  }
+  if(bgFadeT>0){
+    var k=bgFadeT/BG_FADE;                             /* 1 = all old, 0 = all new */
+    drawStage(bgPrev,cx,cy,1);
+    drawStage(bgStage,cx,cy,1-k);
+    bgFadeT-=1/60; if(bgFadeT<=0){ bgFadeT=0; bgPrev=-1; }
+  } else drawStage(bgStage,cx,cy,1);
+  g.globalAlpha=BG_VEIL; g.fillStyle="#05060D"; g.fillRect(0,0,VW,VH); g.globalAlpha=1;
+}
+window.__stage=function(){ return {stage:bgStage,prev:bgPrev,fade:Math.round(bgFadeT*100)/100,col:Math.round(levelColOffset()+view.x/TS),
+  far:BG.far.map(function(i){return !!(i&&i.ok);}),near:BG.near.map(function(i){return !!(i&&i.ok);})}; };
+
 function drawTiles(cx,cy,lights){
   var p=pal();
   var tx0=Math.max(0,Math.floor(cx/TS)),tx1=Math.min(MAP_W-1,Math.ceil((cx+VW)/TS));
@@ -1049,6 +1232,24 @@ function drawTiles(cx,cy,lights){
   }
 }
 
+/* Which marine sheet, which frame. Three sheets, picked in this order — aim beats
+   walk beats the pose sheet: aiming anywhere but level (40px cells, the raised
+   bolter needs the headroom), walking on the ground (4-frame cycle every 6 ticks),
+   otherwise the old poses. Null = no sprites, draw the canvas marine instead.
+   Split out of drawPlayer so window.__pose() reports the same choice that ships. */
+function playerPose(p,slot){
+  var base=SPRITES.loaded&&SPRITES.player[slot];
+  if(!base) return null;
+  var moving=(Math.abs(p.vx)>20);
+  if(!p.prone&&p.aimY!==0&&SPRITES.playerAim[slot])
+    return {sheet:SPRITES.playerAim[slot],cell:40,kind:"aim",
+            frame:(p.aimY>0)?2:(p.aimX===0?0:1)};   /* up / diag-up / diag-down */
+  if(!p.prone&&p.onGround&&moving&&SPRITES.playerWalk[slot])
+    return {sheet:SPRITES.playerWalk[slot],cell:32,kind:"walk",frame:Math.floor(tick/6)%4};
+  return {sheet:base,cell:32,kind:"pose",
+          frame:p.prone?3:(!p.onGround?2:(moving?1:0))};
+}
+
 function drawPlayer(p,cx,cy,lights){
   if(!p.active||p.dead||!p.alive) return;
   var px2=p.x-cx, py2=p.y-cy;
@@ -1057,6 +1258,7 @@ function drawPlayer(p,cx,cy,lights){
   var hot=reaching?"#FFF0C4":"#FFFFFF";
   var dim=(p.light<2);
   var flick=(p.invT>0)&&(Math.floor(tclock*22)%2===0);
+  var shielded=(p.shieldT>0);
 
   for(var i=0;i<p.trail.length;i++){
     var tr=p.trail[i], k=1-tr.t/0.32;
@@ -1071,6 +1273,18 @@ function drawPlayer(p,cx,cy,lights){
   var w=p.w*sx, h=p.h*sy;
   var ox=px2+p.w/2, oy=py2+p.h-h/2;
   var inset=dim?1.4:0;
+  var slot=p.slot%5;
+  var pose=playerPose(p,slot);
+  if(pose){
+    /* feet on the hitbox floor, centred on it. The sprite is bigger than the
+       11x15 box on purpose; collision never looks at the picture. */
+    g.save(); g.imageSmoothingEnabled=false;
+    g.translate(ox,py2+p.h);
+    g.scale(p.face<0?-sx:sx,sy);
+    if(dim) g.globalAlpha=0.7;
+    g.drawImage(pose.sheet,pose.frame*pose.cell,0,pose.cell,pose.cell,-pose.cell/2,-pose.cell,pose.cell,pose.cell);
+    g.restore();
+  } else {
   g.save(); g.translate(ox,oy);
   g.beginPath();
   var rw=w/2-inset, rh=h/2-inset, r=2.6;
@@ -1093,6 +1307,16 @@ function drawPlayer(p,cx,cy,lights){
   g.beginPath(); g.moveTo(ax/al*3,ay/al*3-rh*0.1); g.lineTo(ax/al*9,ay/al*9-rh*0.1); g.stroke();
   g.globalAlpha=1;
   g.restore();
+  }
+
+  if(shielded){
+    var pulse=0.45+0.35*Math.sin(tclock*8);
+    g.globalAlpha=pulse; g.strokeStyle="#6EE7F0"; g.lineWidth=1.8;
+    g.beginPath(); g.arc(px2+p.w/2,py2+p.h/2,p.h*0.7,0,6.283); g.stroke();
+    g.globalAlpha=pulse*0.15; g.fillStyle="#6EE7F0";
+    g.beginPath(); g.arc(px2+p.w/2,py2+p.h/2,p.h*0.7,0,6.283); g.fill();
+    g.globalAlpha=1;
+  }
 
   if(p.onGround&&Math.abs(p.vx)>P.maxRun*0.72){
     g.globalAlpha=0.30; g.fillStyle=col;
@@ -1126,13 +1350,27 @@ function drawPlayer(p,cx,cy,lights){
     g.textAlign="left";
   }
   var lr=(dim?34:58)+intensity*22+Math.sin(tclock*3)*2;
-  lights.push([px2+p.w/2,py2+p.h/2,lr,col,dim?0.72:1]);
+  /* 6th slot = "this is a player glow". At the low tier it is the only light that
+     survives, so the mote still pushes the dark back even when nothing else does. */
+  lights.push([px2+p.w/2,py2+p.h/2,lr,col,dim?0.72:1,1]);
 }
 
 function drawBullets(cx,cy,lights){
   for(var i=0;i<bullets.length;i++){
     var b=bullets[i]; if(!b.alive) continue;
     var bx=b.x-cx, by=b.y-cy;
+    if(b.kind==="h"){
+      /* missile: the strip faces right, so rotate to the velocity. Frames 0/3
+         alternate (straight / flare) off the ttl, so the exhaust flickers. */
+      var ang=Math.atan2(b.vy,b.vx), ms=SPRITES.loaded&&SPRITES.missile;
+      g.save(); g.translate(bx,by); g.rotate(ang);
+      if(ms){ g.imageSmoothingEnabled=false; g.drawImage(ms,((b.ttl>>2)&1)?48:0,0,16,16,-8,-8,16,16); }
+      else { g.fillStyle="#E0616B"; g.fillRect(-5,-2,10,4); g.fillStyle="#FFD98A"; g.fillRect(-8,-1.5,3,3); }
+      g.restore();
+      g.globalAlpha=0.3; g.fillStyle="#FF7A2A"; g.beginPath(); g.arc(bx-Math.cos(ang)*7,by-Math.sin(ang)*7,3,0,6.283); g.fill(); g.globalAlpha=1;
+      lights.push([bx,by,26,"#FF7A2A",0.5]);
+      continue;
+    }
     var col=b.kind==="l"?"#9FE8FF":(b.kind==="s"?"#FFD98A":"#FFF3D2");
     g.globalAlpha=0.35; g.fillStyle=col;
     g.beginPath(); g.arc(bx-b.vx*0.012,by-b.vy*0.012,b.r*1.6,0,6.283); g.fill();
@@ -1156,6 +1394,7 @@ function draw(){
   g.globalAlpha=1; g.globalCompositeOperation="source-over";
   g.fillStyle="#05060D"; g.fillRect(0,0,VW,VH);
   C("draw",g,Math.round(cx),Math.round(cy),MAP_W*TS,MAP_H*TS);
+  drawBackground(Math.round(cx),Math.round(cy));
   drawTiles(Math.round(cx),Math.round(cy),lights);
 
   var i;
@@ -1221,12 +1460,24 @@ function draw(){
   for(i=0;i<players.length;i++) drawPlayer(players[i],Math.round(cx),Math.round(cy),lights);
 
   var amb=0.58+intensity*0.13+(STATE==="title"?0.08:0);
+  /* Low tier drops thirty-odd radial gradients a frame down to one per player.
+     Without lifting the floor that reads as a black screen, so the ambient comes
+     up to pay for the lights that are gone — dimmer mood, same readable world. */
+  if(QUALITY===0) amb=Math.min(1,amb+0.26);
   L("begin",amb);
-  for(i=0;i<lights.length;i++){ var q=lights[i]; L("add",q[0],q[1],q[2],q[3],q[4]); }
+  for(i=0;i<lights.length;i++){ var q=lights[i]; if(QUALITY===0&&!q[5]) continue; L("add",q[0],q[1],q[2],q[3],q[4]); }
   L("composite",g);
   L("bloom",g,0.42+intensity*0.30);
   g.setTransform(SCALE,0,0,SCALE,0,0);
   try{ if(window.JUICE&&JUICE.draw) JUICE.draw(g,Math.round(cx),Math.round(cy)); }catch(err){}
+
+  /* Blast flash. Decays on real frames, not sim ticks — it is paint, and paint
+     is allowed to differ between two peers watching the same explosion. */
+  if(flashT>0){
+    g.globalAlpha=Math.min(0.5,flashT*0.5); g.fillStyle=flashCol;
+    g.fillRect(0,0,VW,VH); g.globalAlpha=1;
+    flashT-=0.09; if(flashT<0) flashT=0;
+  }
 
   if(bannerT>0){
     var ba=Math.min(1,bannerT*1.4);
@@ -1278,23 +1529,42 @@ function draw(){
   hl.className=mp.light<2?"low":"";
   document.getElementById("hLevel").textContent=(curLevel+1)+"/"+LEVELS.length;
   document.getElementById("hLives").textContent=INFINITE_LIVES?"\u221E":(mp.alive?mp.lives:"—");
-  document.getElementById("hGun").textContent=mp.weapon.toUpperCase();
+  document.getElementById("hGun").textContent=mp.weapon.toUpperCase()+(mp.weapon==="h"?"\u00B7"+mp.hAmmo:"")+(mp.shieldT>0?" ◆":"");
+  document.getElementById("hBomb").textContent="💣"+mp.bombs;
   document.getElementById("hScore").textContent=stats.score;
   var bh=""; try{ bh=K("hud",W)||""; }catch(err){}
   document.getElementById("hBoss").textContent=bh||"—";
   var hn=document.getElementById("hNet");
-  if(netOn()){ var st=NET.status(); hn.textContent=st.room+" · "+st.nPlayers+"p · "+st.rttMs+"ms · d"+NET_DELAY; hn.className=netStalled?"stall":""; }
+  if(netOn()){ var st=NET.status(); hn.textContent=st.room+" · "+st.nPlayers+"p · "+st.rttMs+"ms · d"+NET_DELAY+" · "+(st.transport||"WS"); hn.className=netStalled?"stall":""; }
   else { hn.textContent="solo"; hn.className="off"; }
+  var hfps=document.getElementById("hFps");
+  if(hfps) hfps.textContent=dbgFps+"fps\u00B7"+Q_CHAR[QUALITY];
 }
 
 /* ================= loop ================= */
-var acc=0,prev=performance.now();
+var acc=0,prev=performance.now(),dbgFps=60,dbgFrames=0,dbgLast=performance.now();
 function frame(now){
+  dbgFrames++; if(now-dbgLast>=1000){ dbgFps=dbgFrames; dbgFrames=0; dbgLast=now; window.dbgFps=dbgFps; }
+  /* The tier probe. Only real play counts — the title screen holds the world
+     still and is cheap, so measuring there would promise a framerate the game
+     cannot keep. The clock starts on the first play frame, which puts the level
+     load hitch in the interval BEFORE qStart, where it belongs. */
+  if(!qLocked&&STATE==="play"){
+    qFrames++;
+    if(qFrames===Q_WARMUP) qStart=now;
+    if(qFrames>=Q_WARMUP+Q_WINDOW){
+      var el=(now-qStart)/1000;
+      qAvgFps=el>0?Q_WINDOW/el:60;
+      applyQuality(pickTier(qAvgFps));
+      qLocked=true;
+    }
+  }
   acc+=Math.min(0.1,(now-prev)/1000); prev=now;
   while(acc>=DT){
     var frozen=false;
     try{ frozen=!!(window.JUICE&&JUICE.frozen&&JUICE.frozen()); }catch(e){}
     acc-=DT;
+    INPUT.poll();               /* one sample per tick, before the byte is packed */
     var running=(STATE==="play")||(STATE==="pause"&&netOn());
     if(STATE==="transit"){ stepTransit(); }
     else if(running){
@@ -1444,6 +1714,22 @@ elLaunch.addEventListener("click",function(){
 window.__view=function(){ var q=players[me]; return {vx:Math.round(view.x),cx:Math.round(cam.x),meScreenX:q?Math.round(q.x-view.x):null,meColor:q?q.color:null,meActive:q?q.active:null}; };
 window.__dbg=function(){ return {tick:tick,state:STATE,hist:HIST,score:stats.score,n:players.length,me:me,
   players:players.map(function(p){return [p.name,Math.round(p.x),Math.round(p.y),p.lives,p.alive];})}; };
+/* Harness hooks. __setQuality forces a tier (and locks it) so a screenshot of
+   each tier does not depend on actually owning a slow machine. */
+window.__quality=function(){ return {tier:QUALITY,name:Q_CHAR[QUALITY],scale:SCALE,
+  locked:qLocked,frames:qFrames,avgFps:Math.round(qAvgFps*10)/10,
+  canvas:[canvas.width,canvas.height],lightQ:(window.LIGHT?LIGHT.QUALITY:null)}; };
+window.__pickTier=pickTier;
+/* __pose: the marine sheet+frame the renderer is about to use, plus his screen box,
+   so drive_anim.py can crop tight on him and name the pose instead of guessing. */
+window.__pose=function(){ var q=players[me]; if(!q) return null;
+  var pz=playerPose(q,q.slot%5);
+  return {kind:pz?pz.kind:"canvas",frame:pz?pz.frame:-1,cell:pz?pz.cell:0,
+    onGround:!!q.onGround,prone:!!q.prone,dead:!!q.dead||!q.alive,aimX:q.aimX,aimY:q.aimY,tick:tick,
+    px:q.x+q.w/2,py:q.y+q.h/2,cx:view.x,cy:view.y,VW:VW,VH:VH}; };window.__setQuality=function(q){ qLocked=true; applyQuality(q); return window.__quality(); };
+window.__give=function(kind,slot){ return K("grant",W,slot||me,kind); };
+window.__pool=function(){ return {alive:K("poolCount",W),cap:CONTRA.POOL_CAP,bullets:bullets.length}; };
+window.__level=function(n){ loadLevel(n); resetPlayers(); updateCam(); updateView(); return curLevel; };
 window.__warp=function(x){ cam.x=Math.max(0,Math.min(MAP_W*TS-VW,x-VW/2)); for(var i=0;i<players.length;i++){ var sp=groundSpotNear(x+i*12); players[i].x=sp.x; players[i].y=sp.y-20; } };
 setupPlayers(1,["P1"]);
 loadLevel(0);

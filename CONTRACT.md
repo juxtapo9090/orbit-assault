@@ -1,6 +1,6 @@
 # CONTRA-ORBIT — the contract every hand cooks against
 
-Forked 2026-09-04 from `../ledger-run` (Apoapsis, a Mario-style canvas platformer).
+Forked 2026-09-04 from Apoapsis, a single-player canvas platformer.
 Goal: keep the Apoapsis skeleton + cosmos/light/juice look, layer **Contra** on it
 (run-and-gun, 8-way aim, prone, spawners, snipers, turrets, wall boss, lives),
 and make the sim **deterministic** so up to **5 players** can play couch-coop
@@ -11,15 +11,15 @@ being refactored at the same time):
 
 | file | owner | job |
 |---|---|---|
-| `ledger-run.src.html` | Celeste (core) | sim, players, bullets, input, HUD, loop, hooks |
-| `build.py` | Celeste | inlines every module below into `ledger-run.html` |
-| `contra.js` | bee **contra** | enemies, enemy bullets, spawners, boss, weapon capsules, their draw + sfx |
-| `net.js` + `relay.py` | bee **net** | lobby + lockstep input exchange; WebSocket relay |
-| `contra1.txt` `contra2.txt` `contra3.txt` + `verify_level.py` | bee **levels** | Contra-shaped levels + verifier that knows the new glyphs |
-| `tools/chr_rip.py` → `ref/*.png` | bee **ref** | rip NES tile graphics as a reference board (reference only, never shipped) |
-| `juice.js` | bee **contra** may APPEND new sfx names inside the `SFX` table only | |
+| `orbit.src.html` | core | sim, players, bullets, input, HUD, loop, hooks |
+| `build.py` | core | inlines every module below into `orbit.html` |
+| `contra.js` | enemies | enemies, enemy bullets, spawners, boss, weapon capsules, their draw + sfx |
+| `net.js` + `relay.py` | netcode | lobby + lockstep input exchange; WebSocket relay |
+| `contra1.txt` `contra2.txt` `contra3.txt` + `verify_level.py` | levels | run-and-gun-shaped levels + verifier that knows the new glyphs |
+| `tools/chr_rip.py` → `ref/*.png` | reference | rip NES tile graphics as a reference board (reference only, never shipped) |
+| `juice.js` | enemies may APPEND new sfx names inside the `SFX` table only | |
 
-Build: `python3 build.py` → `ledger-run.html`. Serve: `python3 shotserver.py` (port 8901).
+Build: `python3 build.py` → `orbit.html`. Serve: `python3 shotserver.py` (port 8901).
 Existing modules `juice.js` (sfx/music/particles/shake), `cosmos.js` (background),
 `light.js` (2D lighting) stay as they are. Read them if you need their API; they are short.
 
