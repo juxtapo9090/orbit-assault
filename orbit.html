@@ -1413,6 +1413,7 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
   var STALL_CALLS = 30;    // consecutive null inputsFor() → status().stalled
   var PING_MS = 1000;
   var SLOTS = 5;           // the sim always has this many slots
+  var REDUNDANT = 7;       // ticks of my own input repeated in every P2P packet
 
   var b64decode = (function () {
     if (typeof atob === "function") {
@@ -1443,6 +1444,7 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
     // WebRTC is optional: the WebSocket stays authoritative for the input log
     // and carries only peers which do not have an open data channel.
     var players = {}, pcs = {}, started = false;
+    var mine = {};           // tick -> my own byte, kept only for the redundancy window
     var RTC = root.RTCPeerConnection;
     var ICE = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 
@@ -1461,7 +1463,19 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
     function p2pUp(s) { var p = pcs[s]; return !!(p && p.dc && p.dc.readyState === "open"); }
     function wireChannel(s, p, dc) {
       p.dc = dc;
-      dc.onmessage = function (ev) { var m; try { m = JSON.parse(ev.data); } catch (e) { return; } if (m.t === "in" && typeof m.tick === "number" && typeof m.byte === "number") put(s, m.tick, m.byte); };
+      dc.onmessage = function (ev) {
+        var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+        if (m.t !== "in" || typeof m.tick !== "number" || typeof m.byte !== "number") return;
+        put(s, m.tick, m.byte);
+        /* `h` carries the bytes this peer already sent for the ticks just before
+           `tick`, newest first. The channel is unreliable on purpose — waiting for
+           a retransmit is a hitch every player feels — so a drop is covered by the
+           NEXT packet instead, one tick later. Re-put of a known byte is a no-op:
+           same peer, same tick, same value. */
+        if (m.h) for (var i = 0; i < m.h.length; i++) {
+          if (typeof m.h[i] === "number") put(s, m.tick - 1 - i, m.h[i]);
+        }
+      };
       dc.onclose = function () { p.state = "closed"; };
       dc.onerror = function () { p.state = "error"; };
     }
@@ -1714,12 +1728,24 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
       pushInput: function (tick, byte) {
         byte = byte & 255;
         put(slot, tick, byte);                 // echo own input locally
+        mine[tick] = byte;
+        /* Redundancy window: every P2P packet repeats the REDUNDANT bytes before
+           it. One lost datagram used to deadlock the room forever — nothing in
+           lockstep retransmits, so a byte that never lands is a tick that never
+           runs. The relay path (WS) is reliable and needs none of this. */
+        var h = [];
+        for (var d = 1; d <= REDUNDANT; d++) {
+          var b = mine[tick - d];
+          if (b === undefined) break;
+          h.push(b);
+        }
         var fallback = peerSlots();
         for (var i = fallback.length - 1; i >= 0; i--) {
           var s = fallback[i], p = pcs[s];
-          if (p2pUp(s)) { try { p.dc.send(JSON.stringify({ t: "in", tick: tick, byte: byte })); fallback.splice(i, 1); } catch (e) { p.state = "error"; } }
+          if (p2pUp(s)) { try { p.dc.send(JSON.stringify({ t: "in", tick: tick, byte: byte, h: h })); fallback.splice(i, 1); } catch (e) { p.state = "error"; } }
         }
         send({ t: "in", tick: tick, byte: byte, to: fallback });
+        delete mine[tick - REDUNDANT - 8];
       },
 
       inputsFor: function (tick) {
