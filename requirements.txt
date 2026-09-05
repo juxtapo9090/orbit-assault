@@ -1,0 +1,8 @@
+# No third-party dependencies. relay.py is stdlib-only CPython, on purpose — the
+# whole server is one file you can read in an afternoon, and a game you can host
+# without installing anything is a game people actually host.
+#
+# This file exists anyway, empty, because it is a DECLARATION: the Python build
+# path looks for a dependency manifest, and "there is no manifest" and "there are
+# no dependencies" are different statements. Saying nothing leaves it to guesswork;
+# saying it costs one file.

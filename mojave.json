@@ -1,0 +1,9 @@
+{
+  "kind": "service",
+  "runtime": "python",
+  "start": "python3 relay.py",
+  "port": 8902,
+  "alwaysOn": false,
+  "vcpus": 1,
+  "memMiB": 256
+}
