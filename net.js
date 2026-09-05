@@ -71,6 +71,7 @@
     // and carries only peers which do not have an open data channel.
     var players = {}, pcs = {}, started = false;
     var mine = {};           // tick -> my own byte, kept only for the redundancy window
+    var lastTick = [], lastByte = [];   // slot -> newest byte seen, for prediction
     var RTC = root.RTCPeerConnection;
     var ICE = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 
@@ -166,6 +167,12 @@
       var row = buf[tick];
       if (!row) { row = buf[tick] = []; }
       row[s] = byte & 255;
+      // Newest byte per slot, for prediction. Guarded on tick because the
+      // redundancy window re-delivers OLD bytes constantly — taking those as
+      // "latest" would make the predictor guess with stale input.
+      if (lastTick[s] === undefined || tick > lastTick[s]) {
+        lastTick[s] = tick; lastByte[s] = byte & 255;
+      }
     }
 
     function prune(upTo) {
@@ -365,15 +372,31 @@
           if (b === undefined) break;
           h.push(b);
         }
-        var fallback = peerSlots();
-        for (var i = fallback.length - 1; i >= 0; i--) {
-          var s = fallback[i], p = pcs[s];
-          if (p2pUp(s)) { try { p.dc.send(JSON.stringify({ t: "in", tick: tick, byte: byte, h: h })); fallback.splice(i, 1); } catch (e) { p.state = "error"; } }
+        /* P2P first, for latency. But the WebSocket copy now goes out ALWAYS, to
+           everybody, instead of only to peers without a data channel.
+
+           Rollback is why. Prediction is only safe if the truth is GUARANTEED to
+           arrive eventually: a guess that is never corrected is not a prediction,
+           it is a permanent desync. Measured at 60% loss, the redundancy window
+           alone was not enough — some bytes died outright, the confirmed frontier
+           stuck, and the two peers drifted apart for good.
+
+           So the relay (TCP, reliable) is the truth, and P2P is the fast lane
+           that usually gets there first. Duplicates are free: put() writes the
+           same byte for the same slot and tick either way. Cost is roughly
+           3.5 KB/s per player to the relay, which is nothing. */
+        var peers = peerSlots();
+        for (var i = 0; i < peers.length; i++) {
+          var s = peers[i], p = pcs[s];
+          if (p2pUp(s)) { try { p.dc.send(JSON.stringify({ t: "in", tick: tick, byte: byte, h: h })); } catch (e) { p.state = "error"; } }
         }
-        send({ t: "in", tick: tick, byte: byte, to: fallback });
+        send({ t: "in", tick: tick, byte: byte });   // no `to` = broadcast to all
         delete mine[tick - REDUNDANT - 8];
       },
 
+      // The strict reader: null unless every live slot's real byte is present.
+      // Rollback needs this one kept honest — it is how a guess is told from a
+      // fact — so the predictor below is a SEPARATE call, not a flag on this one.
       inputsFor: function (tick) {
         if (!nPlayers) return null;
         prune(tick);
@@ -391,9 +414,30 @@
         return out;
       },
 
+      /* Never null. Any live slot whose real byte has not arrived is filled with
+         that slot's most recent known byte — the honest guess, because a player
+         holding right is overwhelmingly likely to still be holding right one
+         tick later. `guessed` names exactly which slots were invented, so the
+         caller knows this tick is provisional and must be re-checked against
+         inputsFor() once the truth lands. A guess nobody ever verifies is just
+         a desync with extra steps. */
+      inputsPredicted: function (tick) {
+        if (!nPlayers) return null;
+        prune(tick);
+        var row = buf[tick], hist = logRow(tick);
+        var out = new Uint8Array(nPlayers), guessed = [];
+        for (var s = 0; s < nPlayers; s++) {
+          if (!activeAt(s, tick)) { out[s] = 0; continue; }
+          if (row && row[s] !== undefined) { out[s] = row[s]; continue; }
+          if (hist) { out[s] = hist[s]; continue; }
+          out[s] = lastByte[s] || 0;
+          guessed.push(s);
+        }
+        return { row: out, guessed: guessed };
+      },
+
       // The core calls this once its replay has reached the live edge.
-      caughtUp: function () { catchingUp = false; },
-      resumeInfo: function () { return resumeInfo(); },
+      caughtUp: function () { catchingUp = false; },      resumeInfo: function () { return resumeInfo(); },
 
       status: function () {
         var total = 0, up = 0;

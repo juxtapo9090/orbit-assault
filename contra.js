@@ -128,6 +128,39 @@
     for (var y = ty; y < W.MAP_H; y++) if (W.solidAt(tx, y) || W.oneWayAt(tx, y)) return y * TS;
     return W.MAP_H * TS;
   }
+  /* The first row of this column that is not roof. Level 2 is the only roofed map
+     — rows 0-1 are solid all the way across — and a spawn that scanned "down from
+     row 1" found the ROOF, dropped the whole gate wave on top of the world at
+     y=-14, and left it there: alive, off the top of the screen, unreachable, and
+     still counted. The camera locks until the room is clear, so the run ended
+     there. Measured, not guessed: 10 of 10 runners at y=-14 on level 2, 0 on
+     levels 1 and 3, which have open sky. */
+  function skyRowAt(W, tx) {
+    for (var y = 0; y < W.MAP_H; y++) if (!W.solidAt(tx, y) && !W.oneWayAt(tx, y)) return y;
+    return W.MAP_H;                          // solid top to bottom: nowhere to stand
+  }
+  function floorRowAt(W, tx) {               // the row a body walking this column stands on
+    for (var y = skyRowAt(W, tx); y < W.MAP_H; y++) if (W.solidAt(tx, y) || W.oneWayAt(tx, y)) return y;
+    return W.MAP_H;
+  }
+  /* How far the gate's own ground reaches toward one screen edge before something
+     a runner cannot pass. A runner hops 26px — ONE tile — so a step up of two or
+     more is a wall it will stand and jump against for the rest of the level.
+     Level 2's gate screen has a ten-tile pillar inside it and the wave used to
+     spawn on the far side: seven runners wedged against its face, alive, counted,
+     and the camera locked until they died, which they never did.
+     Deterministic — map plus the locked camera, no player state — so every peer
+     picks the same columns. */
+  function reachEdge(W, fromCol, dir, stopCol) {
+    var c = fromCol, row = floorRowAt(W, c);
+    while (dir > 0 ? c + dir <= stopCol : c + dir >= stopCol) {
+      var nrow = floorRowAt(W, c + dir);
+      if (nrow >= W.MAP_H) break;            // nothing to stand on: a pit, not a route
+      if (nrow < row - 1) break;             // a two-tile step up is a wall to a runner
+      c += dir; row = nrow;
+    }
+    return c;
+  }
   function bulletDmg(kind) { return kind === 'l' ? 3 : (kind === 'h' ? MISSILE_DMG : 1); }
   function bulletHitOnce(b, id) {            // laser pierces: remember what it already hit
     if (b.kind !== 'l') { b.alive = false; return true; }
@@ -992,12 +1025,21 @@
     var n = GATE_MIN + Math.floor(W.rng() * GATE_SPAN);
     G.n = n;                                   /* what LANDED, for the tests */
     var camX = W.camX(), left = camX - 20, right = camX + W.VW + 20;
+    /* Clamped to the ground this gate actually connects to. On an open screen
+       these land exactly where they always did, just off each edge; where a wall
+       stands in the way the wave is pulled to the near side of it instead of
+       being stranded behind it. */
+    var loCol = reachEdge(W, G.col, -1, Math.floor(left / TS));
+    var hiCol = reachEdge(W, G.col, 1, Math.floor(right / TS));
+    var loX = loCol * TS, hiX = hiCol * TS;
     for (var k = 0; k < n; k++) {
       var fromLeft = W.rng() < 0.5;
-      var x = fromLeft ? left - (k % 4) * 22 : right + (k % 4) * 22;
+      var x = fromLeft ? Math.max(loX, left - (k % 4) * 22)
+                       : Math.min(hiX, right + (k % 4) * 22);
       if (G.stage === 2 && (k % 3) === 0) {    // Tau corridor: marksmen on the deck
         var tx = Math.floor((camX + 40 + W.rng() * (W.VW - 80)) / TS);
-        var fy = floorBelow(W, tx, 1);
+        if (tx < loCol) tx = loCol; else if (tx > hiCol) tx = hiCol;
+        var fy = floorBelow(W, tx, skyRowAt(W, tx));
         st.snipers.push({ id: nextId++, alive: true, x: tx * TS + 3, y: fy - 14, w: 10, h: 14,
           face: -1, cd: 0.9 + W.rng() * 0.7, t: 0, flash: 0, gate: idx });
         continue;
@@ -1005,8 +1047,10 @@
       /* on the floor beneath the SPAWN column, not the gate's floor: the screen
          edge is 200px from the gate and the ground under it is often somewhere
          else entirely. Spawning at the gate's height dropped a third of every
-         wave straight into a pit before the player ever saw it. */
-      var gy = floorBelow(W, Math.floor(x / TS), 1);
+         wave straight into a pit before the player ever saw it.
+         The scan starts below the roof, not at row 1 — see skyRowAt. */
+      var sx = Math.floor(x / TS);
+      var gy = floorBelow(W, sx, skyRowAt(W, sx));
       var r = spawnRunner(x, gy - 20, -1);
       r.gate = idx;
       r.cult = (G.stage !== 1) && ((k % 3) === 1);   // ork stage is orks, full stop

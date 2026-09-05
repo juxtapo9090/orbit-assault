@@ -207,7 +207,7 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
         <button type="button" class="ghost" id="btnJoin">Join</button>
       </div>
       <div class="row">
-        <input id="inRelay" class="wide" placeholder="relay ws://host:8902">
+        <input id="inRelay" class="wide" placeholder="relay (defaults to this page's host)">
       </div>
       <div class="lobby" id="lobby" hidden></div>
       <div class="row" id="lobbyRow" hidden>
@@ -1445,6 +1445,7 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
     // and carries only peers which do not have an open data channel.
     var players = {}, pcs = {}, started = false;
     var mine = {};           // tick -> my own byte, kept only for the redundancy window
+    var lastTick = [], lastByte = [];   // slot -> newest byte seen, for prediction
     var RTC = root.RTCPeerConnection;
     var ICE = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 
@@ -1540,6 +1541,12 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
       var row = buf[tick];
       if (!row) { row = buf[tick] = []; }
       row[s] = byte & 255;
+      // Newest byte per slot, for prediction. Guarded on tick because the
+      // redundancy window re-delivers OLD bytes constantly — taking those as
+      // "latest" would make the predictor guess with stale input.
+      if (lastTick[s] === undefined || tick > lastTick[s]) {
+        lastTick[s] = tick; lastByte[s] = byte & 255;
+      }
     }
 
     function prune(upTo) {
@@ -1739,15 +1746,31 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
           if (b === undefined) break;
           h.push(b);
         }
-        var fallback = peerSlots();
-        for (var i = fallback.length - 1; i >= 0; i--) {
-          var s = fallback[i], p = pcs[s];
-          if (p2pUp(s)) { try { p.dc.send(JSON.stringify({ t: "in", tick: tick, byte: byte, h: h })); fallback.splice(i, 1); } catch (e) { p.state = "error"; } }
+        /* P2P first, for latency. But the WebSocket copy now goes out ALWAYS, to
+           everybody, instead of only to peers without a data channel.
+
+           Rollback is why. Prediction is only safe if the truth is GUARANTEED to
+           arrive eventually: a guess that is never corrected is not a prediction,
+           it is a permanent desync. Measured at 60% loss, the redundancy window
+           alone was not enough — some bytes died outright, the confirmed frontier
+           stuck, and the two peers drifted apart for good.
+
+           So the relay (TCP, reliable) is the truth, and P2P is the fast lane
+           that usually gets there first. Duplicates are free: put() writes the
+           same byte for the same slot and tick either way. Cost is roughly
+           3.5 KB/s per player to the relay, which is nothing. */
+        var peers = peerSlots();
+        for (var i = 0; i < peers.length; i++) {
+          var s = peers[i], p = pcs[s];
+          if (p2pUp(s)) { try { p.dc.send(JSON.stringify({ t: "in", tick: tick, byte: byte, h: h })); } catch (e) { p.state = "error"; } }
         }
-        send({ t: "in", tick: tick, byte: byte, to: fallback });
+        send({ t: "in", tick: tick, byte: byte });   // no `to` = broadcast to all
         delete mine[tick - REDUNDANT - 8];
       },
 
+      // The strict reader: null unless every live slot's real byte is present.
+      // Rollback needs this one kept honest — it is how a guess is told from a
+      // fact — so the predictor below is a SEPARATE call, not a flag on this one.
       inputsFor: function (tick) {
         if (!nPlayers) return null;
         prune(tick);
@@ -1765,9 +1788,30 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
         return out;
       },
 
+      /* Never null. Any live slot whose real byte has not arrived is filled with
+         that slot's most recent known byte — the honest guess, because a player
+         holding right is overwhelmingly likely to still be holding right one
+         tick later. `guessed` names exactly which slots were invented, so the
+         caller knows this tick is provisional and must be re-checked against
+         inputsFor() once the truth lands. A guess nobody ever verifies is just
+         a desync with extra steps. */
+      inputsPredicted: function (tick) {
+        if (!nPlayers) return null;
+        prune(tick);
+        var row = buf[tick], hist = logRow(tick);
+        var out = new Uint8Array(nPlayers), guessed = [];
+        for (var s = 0; s < nPlayers; s++) {
+          if (!activeAt(s, tick)) { out[s] = 0; continue; }
+          if (row && row[s] !== undefined) { out[s] = row[s]; continue; }
+          if (hist) { out[s] = hist[s]; continue; }
+          out[s] = lastByte[s] || 0;
+          guessed.push(s);
+        }
+        return { row: out, guessed: guessed };
+      },
+
       // The core calls this once its replay has reached the live edge.
-      caughtUp: function () { catchingUp = false; },
-      resumeInfo: function () { return resumeInfo(); },
+      caughtUp: function () { catchingUp = false; },      resumeInfo: function () { return resumeInfo(); },
 
       status: function () {
         var total = 0, up = 0;
@@ -1924,6 +1968,39 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
   function floorBelow(W, tx, ty) {           // pixel y of the top of the first solid at/below row ty
     for (var y = ty; y < W.MAP_H; y++) if (W.solidAt(tx, y) || W.oneWayAt(tx, y)) return y * TS;
     return W.MAP_H * TS;
+  }
+  /* The first row of this column that is not roof. Level 2 is the only roofed map
+     — rows 0-1 are solid all the way across — and a spawn that scanned "down from
+     row 1" found the ROOF, dropped the whole gate wave on top of the world at
+     y=-14, and left it there: alive, off the top of the screen, unreachable, and
+     still counted. The camera locks until the room is clear, so the run ended
+     there. Measured, not guessed: 10 of 10 runners at y=-14 on level 2, 0 on
+     levels 1 and 3, which have open sky. */
+  function skyRowAt(W, tx) {
+    for (var y = 0; y < W.MAP_H; y++) if (!W.solidAt(tx, y) && !W.oneWayAt(tx, y)) return y;
+    return W.MAP_H;                          // solid top to bottom: nowhere to stand
+  }
+  function floorRowAt(W, tx) {               // the row a body walking this column stands on
+    for (var y = skyRowAt(W, tx); y < W.MAP_H; y++) if (W.solidAt(tx, y) || W.oneWayAt(tx, y)) return y;
+    return W.MAP_H;
+  }
+  /* How far the gate's own ground reaches toward one screen edge before something
+     a runner cannot pass. A runner hops 26px — ONE tile — so a step up of two or
+     more is a wall it will stand and jump against for the rest of the level.
+     Level 2's gate screen has a ten-tile pillar inside it and the wave used to
+     spawn on the far side: seven runners wedged against its face, alive, counted,
+     and the camera locked until they died, which they never did.
+     Deterministic — map plus the locked camera, no player state — so every peer
+     picks the same columns. */
+  function reachEdge(W, fromCol, dir, stopCol) {
+    var c = fromCol, row = floorRowAt(W, c);
+    while (dir > 0 ? c + dir <= stopCol : c + dir >= stopCol) {
+      var nrow = floorRowAt(W, c + dir);
+      if (nrow >= W.MAP_H) break;            // nothing to stand on: a pit, not a route
+      if (nrow < row - 1) break;             // a two-tile step up is a wall to a runner
+      c += dir; row = nrow;
+    }
+    return c;
   }
   function bulletDmg(kind) { return kind === 'l' ? 3 : (kind === 'h' ? MISSILE_DMG : 1); }
   function bulletHitOnce(b, id) {            // laser pierces: remember what it already hit
@@ -2789,12 +2866,21 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
     var n = GATE_MIN + Math.floor(W.rng() * GATE_SPAN);
     G.n = n;                                   /* what LANDED, for the tests */
     var camX = W.camX(), left = camX - 20, right = camX + W.VW + 20;
+    /* Clamped to the ground this gate actually connects to. On an open screen
+       these land exactly where they always did, just off each edge; where a wall
+       stands in the way the wave is pulled to the near side of it instead of
+       being stranded behind it. */
+    var loCol = reachEdge(W, G.col, -1, Math.floor(left / TS));
+    var hiCol = reachEdge(W, G.col, 1, Math.floor(right / TS));
+    var loX = loCol * TS, hiX = hiCol * TS;
     for (var k = 0; k < n; k++) {
       var fromLeft = W.rng() < 0.5;
-      var x = fromLeft ? left - (k % 4) * 22 : right + (k % 4) * 22;
+      var x = fromLeft ? Math.max(loX, left - (k % 4) * 22)
+                       : Math.min(hiX, right + (k % 4) * 22);
       if (G.stage === 2 && (k % 3) === 0) {    // Tau corridor: marksmen on the deck
         var tx = Math.floor((camX + 40 + W.rng() * (W.VW - 80)) / TS);
-        var fy = floorBelow(W, tx, 1);
+        if (tx < loCol) tx = loCol; else if (tx > hiCol) tx = hiCol;
+        var fy = floorBelow(W, tx, skyRowAt(W, tx));
         st.snipers.push({ id: nextId++, alive: true, x: tx * TS + 3, y: fy - 14, w: 10, h: 14,
           face: -1, cd: 0.9 + W.rng() * 0.7, t: 0, flash: 0, gate: idx });
         continue;
@@ -2802,8 +2888,10 @@ kbd{background:var(--panel);border:1px solid var(--line);border-bottom-width:2px
       /* on the floor beneath the SPAWN column, not the gate's floor: the screen
          edge is 200px from the gate and the ground under it is often somewhere
          else entirely. Spawning at the gate's height dropped a third of every
-         wave straight into a pit before the player ever saw it. */
-      var gy = floorBelow(W, Math.floor(x / TS), 1);
+         wave straight into a pit before the player ever saw it.
+         The scan starts below the roof, not at row 1 — see skyRowAt. */
+      var sx = Math.floor(x / TS);
+      var gy = floorBelow(W, sx, skyRowAt(W, sx));
       var r = spawnRunner(x, gy - 20, -1);
       r.gate = idx;
       r.cult = (G.stage !== 1) && ((k % 3) === 1);   // ork stage is orks, full stop
@@ -4248,10 +4336,20 @@ var BOMB_VX=180, BOMB_VY=-220;
    Per-peer values may differ: everyone still consumes the same byte for the same
    tick, so this is personal input lag, never a desync. */
 var NET_DELAY=3, NET_DELAY_MAX=16, stallFrames=0;
+/* Rollback on by default; __setRollback(false) restores the old wait-for-everyone
+   behaviour so the two can be measured against each other on the same run. */
+var ROLLBACK=true;
 /* Couch rule: nobody sits out watching. Deaths still cost you the run's tally and
    your gun, they just never take you off the screen. Flip to false for the
    three-lives arcade version. */
 var INFINITE_LIVES=true;
+/* Co-op revive: a dead player leaves a beacon a teammate must stand on for three
+   seconds. Off. Played, it did not read right — the old arcade contract is that a
+   death costs you your gun and your place in the line and gives you back the
+   fight immediately, and standing still in a firefight to farm a corpse is the
+   opposite of that. Normal Contra respawn is the default now. The beacon
+   machinery is still here and still tested; this is the switch, not a deletion. */
+var COOP_REVIVE=false;
 /* Five hues that stay apart under bloom and on a dim screen, each with its own
    crest shape drawn above the head — colour alone was not enough to tell each
    other apart mid-firefight. */
@@ -4269,8 +4367,13 @@ var trans={t:0,dir:0};
 var tclock=0;
 var flashT=0, flashCol="#FFE0A8";     // render-only screen flash, decays in draw()
 
-function J(fn,a,b,c,d){ try{ if(window.JUICE&&JUICE[fn]) return JUICE[fn](a,b,c,d); }catch(e){} }
-function C(fn,a,b,c,d,e){ try{ if(window.COSMOS&&COSMOS[fn]) return COSMOS[fn](a,b,c,d,e); }catch(err){} }
+/* `resim` is true only while rollback is replaying ticks the player has already
+   seen. Muting here — at the single funnel — is what makes a rewind invisible:
+   without it every rewound tick would re-fire its explosions and re-play its
+   sounds, so a lossy link would sound like a machine gun. Neither is sim state,
+   so muting them changes no number any peer will ever compare. */
+function J(fn,a,b,c,d){ if(resim) return; try{ if(window.JUICE&&JUICE[fn]) return JUICE[fn](a,b,c,d); }catch(e){} }
+function C(fn,a,b,c,d,e){ if(resim) return; try{ if(window.COSMOS&&COSMOS[fn]) return COSMOS[fn](a,b,c,d,e); }catch(err){} }
 function L(fn,a,b,c,d,e){ try{ if(window.LIGHT&&LIGHT[fn]) return LIGHT[fn](a,b,c,d,e); }catch(err){} }
 
 /* Set the tier. Changing SCALE resizes the backing store, which wipes the 2D
@@ -4638,7 +4741,7 @@ function kill(p){
      died is then somewhere under the floor with nowhere to stand. Same column,
      real floor — you still walk back to where they fell, you can just get there. */
   p.beaconT=0;
-  if(activeCount()>1){
+  if(COOP_REVIVE&&activeCount()>1){
     /* the CENTRE of a player standing on that spot — groundSpotNear returns a
        top-left corner. The revive circle is measured centre-to-centre, so an
        off-by-half-a-body here quietly shrinks a 2-tile circle to about one. */
@@ -5515,8 +5618,30 @@ function frame(now){
            leave a hole, or the whole room waits forever for a byte nobody sent. */
         var target=tick+NET_DELAY;
         while(pushedTick<target){ pushedTick++; NET.pushInput(pushedTick,lb); }
-        var row=NET.inputsFor(tick);
-        if(!row){
+
+        /* Fold in whatever truth arrived since the last frame. This is where a
+           wrong guess gets caught and rewound, before we add another tick on top
+           of it. */
+        /* Leaving `play` invalidates the whole prediction window: nothing behind
+           us can be replayed across the branch change, so confirm up to here and
+           start clean. */
+        if(STATE!=="play"&&rbState==="play"){ verifyFrom=tick; snaps={}; usedRow={}; }
+        rbState=STATE;
+        verifyPredictions(); rbPrune();
+
+        var strict=NET.inputsFor(tick);
+        var pr=null;
+        if(strict) pr={row:strict,guessed:[]};
+        /* Predict only in plain `play`. Transitions, deaths and the win screen
+           each drive a different branch of the loop, and a guess that lands
+           inside one cannot be faithfully rewound. */
+        else if(ROLLBACK&&STATE==="play"&&(tick-verifyFrom)<RB_MAX) pr=NET.inputsPredicted(tick);
+
+        if(!pr){
+          /* Either rollback is off, or we are already RB_MAX ticks ahead of the
+             last confirmed one and must not guess deeper than we can rewind. So
+             we wait — the old behaviour, on purpose. Degrading to a visible stall
+             beats degrading to a silent desync. */
           netStalled=true;
           /* DEADLOCK FIX: a stalled peer must keep emitting inputs. Pushing only
              inside the advancing tick loop meant one hitch stopped that peer's
@@ -5528,12 +5653,20 @@ function frame(now){
           if(++stallFrames>30&&NET_DELAY<NET_DELAY_MAX){ NET_DELAY++; stallFrames=0; }
           acc=0; break;
         }
-        netStalled=false; stallFrames=0;
-        for(var i=0;i<players.length;i++) decode(players[i],row[i]||0);
+        /* A guessed tick is not a stall — the game is running, just provisionally.
+           The HUD says so, because "I am predicting you" is worth seeing. */
+        netStalled=pr.guessed.length>0; stallFrames=0;
+        /* Hitstop holds the sim still, so the tick is not consumed and no snapshot
+           is taken for it — same as before rollback existed. */
+        if(!frozen) runTick(tick,pr);
       } else {
-        for(i=0;i<players.length;i++) decode(players[i],i===me?lb:0);
+        /* `var i` lives here now. It used to be declared by the net branch's decode
+           loop, which rollback replaced — leaving SOLO play referencing an undeclared
+           name and throwing once per frame. Caught by the fidelity self-test, not by
+           any coop test, because coop never takes this branch. */
+        for(var i=0;i<players.length;i++) decode(players[i],i===me?lb:0);
+        if(!frozen) step();
       }
-      if(!frozen) step();
       if(STATE==="play"||STATE==="pause") updateCam();
       updateView();
     }
@@ -5547,7 +5680,16 @@ function frame(now){
 var elName=document.getElementById("inName"), elRoom=document.getElementById("inRoom"), elRelay=document.getElementById("inRelay");
 var elLobby=document.getElementById("lobby"), elLobbyRow=document.getElementById("lobbyRow"), elLaunch=document.getElementById("btnLaunch");
 var elMsg=document.getElementById("netMsg");
-try{ elName.value=localStorage.getItem("contra.name")||""; elRelay.value=localStorage.getItem("contra.relay")||("ws://"+location.hostname+":8902"); }catch(e){}
+/* The relay is whatever served this page. relay.py hands out the game and the
+   socket on one port, so same-origin is simply true — and it is the only default
+   that survives being hosted: a page on https:// may not open a plain ws://
+   (the browser blocks it as mixed content, silently as far as the player is
+   concerned), and a hardcoded :8902 is a port no reverse proxy exposes. Still a
+   text field, still remembered, so a LAN game can point somewhere else. */
+function defaultRelay(){
+  return (location.protocol==="https:"?"wss://":"ws://")+location.host;
+}
+try{ elName.value=localStorage.getItem("contra.name")||""; elRelay.value=localStorage.getItem("contra.relay")||defaultRelay(); }catch(e){ elRelay.value=defaultRelay(); }
 function myName(){ var n=(elName.value||"").trim().slice(0,12); try{ localStorage.setItem("contra.name",n); }catch(e){} return n||"P"; }
 function relayUrl(){ var u=(elRelay.value||"").trim(); try{ localStorage.setItem("contra.relay",u); }catch(e){} return u; }
 var lobbyNames=[], lastLobby=[];
@@ -5560,6 +5702,7 @@ function begin(seed,founders,slot){
   ovPause.hidden=true;
   STATE="play"; restartAll();
   pushedTick=-1; stallFrames=0;
+  snaps={}; usedRow={}; inLog={}; verifyFrom=0; resim=false; rbCount=0; rbDeepest=0; rbPredicted=0; rbFailed=0;
   if(netOn()){
     /* Two round trips of headroom, floor 4 ticks, so jitter has somewhere to go. */
     var rtt=NET.status().rttMs||0;
@@ -5647,10 +5790,199 @@ elLaunch.addEventListener("click",function(){
   NET.start((Date.now()&0x7fffffff)|0);
 });
 
+/* ================= rollback: snapshot / restore =================
+   Lockstep's defining property is that everyone waits for the slowest peer. To
+   stop waiting we have to be able to GUESS a missing input, run the tick anyway,
+   and then — when the real byte turns up and disagrees — rewind and re-run.
+   Rewinding needs the whole simulation captured and put back byte-exact.
+
+   Sim state (must be captured): players, bullets, coins, lumes, enemies, flag,
+   cam, view, tick, rngState, stats, trans, level bookkeeping, and CONTRA's
+   entire world — which conveniently lives in one object it hands us via
+   _state().
+
+   NOT sim state (must not be captured): anything render-only — screen flash,
+   banners, particles, music, the quality tier. Those are consequences of the
+   sim, not inputs to it. Cloning them wastes time, and restoring them would
+   make a rewind visible as a flicker.
+
+   structuredClone beats JSON here: it keeps cycles, and this world has them
+   (a beacon knows its player, a bullet knows its owner). */
+function simSnapshot(){
+  return {
+    tick:tick, rngState:rngState, STATE:STATE, curLevel:curLevel,
+    players:players, bullets:bullets, coins:coins, lumes:lumes, enemies:enemies,
+    flag:flag, cam:cam, view:view, stats:stats, trans:trans, spawn:spawn,
+    coinTotal:coinTotal, hasBoss:hasBoss, promoStreak:promoStreak,
+    contra:(window.CONTRA&&CONTRA._state)?CONTRA._state():null
+  };
+}
+window.__snapCost=function(n){
+  n=n||200; var s=simSnapshot(), t0=performance.now();
+  for(var i=0;i<n;i++) structuredClone(s);
+  var ms=(performance.now()-t0)/n;
+  var bytes=-1; try{ bytes=JSON.stringify(s).length; }catch(e){ bytes="cyclic"; }
+  return {ms:ms, bytes:bytes, tick:tick, budgetMs:1000/60,
+          pctOfFrame:100*ms/(1000/60),
+          counts:{players:players.length,bullets:bullets.length,
+                  enemies:enemies.length,coins:coins.length,lumes:lumes.length}};
+};
+
+/* Restore is IN PLACE, never by reassignment. W caches live references to
+   players/bullets/enemies/cam and hands them to CONTRA, so `players = clone`
+   would leave CONTRA simulating last tick's array — the same trap buildEntities()
+   already warns about with "truncates it in place, never reassigns". */
+function fillArr(dst,src){ dst.length=0; for(var i=0;i<src.length;i++) dst.push(src[i]); }
+function fillObj(dst,src){ var k; for(k in dst) delete dst[k]; for(k in src) dst[k]=src[k]; }
+
+function simRestore(snap){
+  /* Clone on the way IN too: the same snapshot can be restored more than once
+     (two rollbacks to the same tick), and handing out the stored object would
+     let the re-simulation mutate our only copy of the past. */
+  var s=structuredClone(snap);
+  tick=s.tick; rngState=s.rngState; STATE=s.STATE; curLevel=s.curLevel;
+  coinTotal=s.coinTotal; hasBoss=s.hasBoss; promoStreak=s.promoStreak;
+  flag=s.flag;
+  fillArr(players,s.players); fillArr(bullets,s.bullets);
+  fillArr(coins,s.coins); fillArr(lumes,s.lumes); fillArr(enemies,s.enemies);
+  fillObj(cam,s.cam); fillObj(view,s.view); fillObj(stats,s.stats);
+  fillObj(trans,s.trans); fillObj(spawn,s.spawn);
+  W.tick=tick;
+  var st=(window.CONTRA&&CONTRA._state)?CONTRA._state():null;
+  if(st&&s.contra) fillObj(st,s.contra);
+}
+
+/* ================= rollback: predict, verify, rewind =================
+   The whole point: never wait for a peer again. If a byte has not arrived we
+   guess it (repeat their last input), run the tick, and draw. When the real byte
+   lands we compare it against the guess. Identical — and it usually is, because
+   people hold buttons down — costs nothing at all. Different, and we restore the
+   snapshot from that tick and re-run every tick since with the truth.
+
+   The player never sees the rewind: it happens inside one frame, and effects are
+   muted while it runs, so the only visible evidence is a remote character
+   correcting its position slightly.
+
+   RB_MAX is the safety valve. Beyond that depth we stop predicting and wait, the
+   way the old code always did. That matters: under sustained loss this design
+   degrades into the OLD behaviour (a stall) rather than into divergence. A stall
+   is visible and recoverable; a desync is silent and permanent. */
+var RB_MAX=12;
+var snaps={}, usedRow={}, inLog={}, verifyFrom=0, resim=false;
+var rbCount=0, rbDeepest=0, rbPredicted=0, rbFailed=0, rbState="play";
+
+function rowsDiffer(a,b){
+  if(!a||!b) return true;
+  var n=Math.max(a.length,b.length);
+  for(var i=0;i<n;i++) if((a[i]||0)!==(b[i]||0)) return true;
+  return false;
+}
+function bestRow(t){
+  var real=NET.inputsFor(t);
+  if(real) return {row:real,guessed:[]};
+  return NET.inputsPredicted(t);
+}
+/* Snapshot BEFORE the tick runs, tagged with the tick it is about to execute —
+   so snaps[T] means "the world as it stood entering T", which is exactly where a
+   rewind to T has to land. */
+function runTick(t,pr){
+  snaps[t]=structuredClone(simSnapshot());
+  usedRow[t]=new Uint8Array(pr.row);
+  /* Durable record of the inputs this peer ACTUALLY simulated each tick, rewritten
+     by every rollback. Two peers that converge correctly must end with identical
+     logs; if the logs match but the worlds differ, the fault is in the replay, and
+     if the logs differ it is in the convergence. Test-only, unbounded, so it is
+     read by harnesses and never by the game. */
+  inLog[t]=Array.prototype.join.call(pr.row,",");
+  if(pr.guessed.length) rbPredicted++;
+  for(var i=0;i<players.length;i++) decode(players[i],pr.row[i]||0);
+  step();
+  /* The camera is SIM state, not presentation — it only ever advances, and it
+     clamps the players, which is why the section header calls it "sim-side: it
+     clamps players, so it must be deterministic". The live loop runs it once per
+     tick right after step(), so a replay that skips it rewinds into a world whose
+     camera never moved and produces different physics. updateView is genuinely
+     presentation-only (its own comment says so) and is deliberately NOT replayed. */
+  if(STATE==="play"||STATE==="pause") updateCam();
+}
+function rollbackTo(T){
+  var s=snaps[T];
+  if(!s){
+    /* We predicted a tick, the guess was wrong, and the snapshot needed to undo it
+       is gone. There is no honest recovery from here — this peer's world has
+       silently diverged from everyone else's. Say so LOUDLY rather than play on
+       pretending: a desync reported as fine is the worst thing this file can do.
+       Should be unreachable now that every input is guaranteed to arrive over the
+       relay; if it ever fires, that guarantee has broken. */
+    rbFailed++;
+    if(rbFailed===1&&window.console) console.error("DESYNC: no snapshot for tick "+T+
+      " (tick="+tick+", verifyFrom="+verifyFrom+"); a wrong prediction can no longer be undone.");
+    return false;
+  }
+  var back=tick;
+  simRestore(s);
+  resim=true;                       /* mute sfx/particles for the replayed ticks */
+  for(var t=T;t<back;t++){
+    runTick(t,bestRow(t));
+    /* The live loop does NOT run step() unconditionally — a death or a level
+       change moves STATE, and from then on the frame takes the `transit` branch,
+       which advances no tick at all. Replaying straight through would simulate
+       ticks the real run never had. So the moment a corrected input pushes us out
+       of `play`, stop replaying and hand back to the normal loop, which owns
+       every other STATE. Divergence found at 80% loss showed up ONLY on deep
+       rewinds, because depth is what makes a window likely to span a death. */
+    if(STATE!=="play"){ verifyFrom=tick; break; }
+  }
+  resim=false;
+  rbCount++; if(back-T>rbDeepest) rbDeepest=back-T;
+  return true;
+}
+/* Walk the confirmed frontier forward. Every tick below verifyFrom has been
+   checked against real inputs and is known good. */
+function verifyPredictions(){
+  while(verifyFrom<tick){
+    var real=NET.inputsFor(verifyFrom);
+    if(!real) return;                       /* truth not in yet — check again next frame */
+    if(rowsDiffer(real,usedRow[verifyFrom])) rollbackTo(verifyFrom);
+    verifyFrom++;
+  }
+}
+function rbPrune(){
+  var keep=Math.max(0,verifyFrom-2);
+  for(var k in snaps){ if(+k<keep){ delete snaps[k]; delete usedRow[k]; } }
+}
+window.__rb=function(){ return {count:rbCount,deepest:rbDeepest,predicted:rbPredicted,failed:rbFailed,
+  verifyFrom:verifyFrom,tick:tick,held:Object.keys(snaps).length}; };
+
 /* The title screen is the real world, held still. */
 window.__view=function(){ var q=players[me]; return {vx:Math.round(view.x),cx:Math.round(cam.x),meScreenX:q?Math.round(q.x-view.x):null,meColor:q?q.color:null,meActive:q?q.active:null}; };
 window.__dbg=function(){ return {tick:tick,state:STATE,hist:HIST,score:stats.score,n:players.length,me:me,
   players:players.map(function(p){return [p.name,Math.round(p.x),Math.round(p.y),p.lives,p.alive];})}; };
+/* Why is this player not moving? The three things that can pin one — terrain, the
+   leash, and a locked camera — are all closure state, so a driver watching from
+   outside can only see that x stopped changing and must then guess which. It
+   guessed wrong three times. This reports all three at once, reads nothing it
+   does not already own, and mutates nothing. */
+window.__why=function(slot){
+  var p=players[slot===undefined?me:slot]; if(!p) return null;
+  var locked=false; try{ locked=!!K("camLocked"); }catch(e){}
+  var anchor=cam.x+VW/2, grid=[];
+  var c0=Math.floor(p.x/TS)-2, r0=Math.floor(p.y/TS)-1;
+  for(var r=r0;r<=r0+3;r++){ var row=""; for(var c=c0;c<=c0+6;c++)
+    row+=(solidAt(c,r)?"#":(oneWayAt(c,r)?"=":".")); grid.push(r+":"+row); }
+  return {x:Math.round(p.x),y:Math.round(p.y),w:p.w,h:p.h,
+    vx:Math.round(p.vx),vy:Math.round(p.vy),onGround:!!p.onGround,
+    camX:Math.round(cam.x),viewX:Math.round(view.x),VW:VW,MAP_W:MAP_W,MAP_H:MAP_H,
+    camLocked:locked, anchor:Math.round(anchor), LEASH:LEASH,
+    leashedRight:(p.x+p.w/2>=anchor+LEASH-1), leashedLeft:(p.x+p.w/2<=anchor-LEASH+1),
+    gridFrom:[c0,r0], grid:grid}; };
+/* Same picture, anywhere on the map — for asking why something that is NOT the
+   player has stopped moving. */
+window.__grid=function(px,py,cw,ch){
+  var c0=Math.floor(px/TS)-(cw>>1), r0=Math.floor(py/TS)-(ch>>1), g=[];
+  for(var r=r0;r<r0+ch;r++){ var row=""; for(var c=c0;c<c0+cw;c++)
+    row+=(solidAt(c,r)?"#":(oneWayAt(c,r)?"=":(spikeAt(c,r)?"^":"."))); g.push((r<10?" ":"")+r+":"+row); }
+  return {from:[c0,r0], grid:g}; };
 /* Harness hooks. __setQuality forces a tier (and locks it) so a screenshot of
    each tier does not depend on actually owning a slow machine. */
 window.__quality=function(){ return {tier:QUALITY,name:Q_CHAR[QUALITY],scale:SCALE,
@@ -5660,6 +5992,97 @@ window.__quality=function(){ return {tier:QUALITY,name:Q_CHAR[QUALITY],scale:SCA
            need:(QUALITY<2?PROMO_NEED[QUALITY]:null),flash:promoFlashT>0?promoFlash:""},
   fps:dbgFps}; };
 window.__pickTier=pickTier;
+window.__setRollback=function(on){ ROLLBACK=!!on; return ROLLBACK; };
+window.__inputLog=function(){ return inLog; };
+/* Deep, cycle-safe digest of EVERYTHING in the snapshot — not a hand-picked list.
+   A fingerprint can only catch fields you already suspected; this catches the ones
+   you forgot, and names the exact path that differs. */
+function deepDigest(o){
+  var seen=new Map(), out=[];
+  function walk(v,path){
+    if(v===null||typeof v!=="object"){ out.push(path+"="+String(v)); return; }
+    if(seen.has(v)){ out.push(path+"=@"+seen.get(v)); return; }
+    seen.set(v,path);
+    var i;
+    if(Array.isArray(v)){ out.push(path+"[]="+v.length);
+      for(i=0;i<v.length;i++) walk(v[i],path+"."+i); return; }
+    var ks=Object.keys(v).sort(); out.push(path+"{}="+ks.length);
+    for(i=0;i<ks.length;i++) walk(v[ks[i]],path+"."+ks[i]);
+  }
+  walk(o,"S"); return out;
+}
+function rbRunOne(t,pat){
+  var r=new Uint8Array(players.length);
+  for(var i=0;i<players.length;i++) r[i]=pat[(t+i*3)%pat.length];
+  for(i=0;i<players.length;i++) decode(players[i],r[i]);
+  step(); if(STATE==="play"||STATE==="pause") updateCam();
+}
+function firstDiff(a,b){
+  var n=Math.min(a.length,b.length);
+  for(var i=0;i<n;i++) if(a[i]!==b[i]) return {i:i,a:a[i],b:b[i]};
+  if(a.length!==b.length) return {i:n,a:"len "+a.length,b:"len "+b.length};
+  return null;
+}
+/* Nested rollback: restore, replay, snapshot DURING the replay, restore THAT, replay
+   again. Real rollback does exactly this; the old self-test never did, which is why
+   it passed while the game diverged. */
+window.__rbSelfTest2=function(K,J){
+  K=K||24; J=J||8;
+  var pat=[1,3,17,33,2,0,16,1,5,32];
+  var t0=tick, A=structuredClone(simSnapshot());
+  var i;
+  for(i=0;i<K;i++) rbRunOne(t0+i,pat);
+  var truth=deepDigest(simSnapshot());
+  simRestore(A);
+  for(i=0;i<J;i++) rbRunOne(t0+i,pat);
+  var B=structuredClone(simSnapshot());          /* snapshot taken mid-replay */
+  for(i=J;i<K;i++) rbRunOne(t0+i,pat);
+  var once=deepDigest(simSnapshot());
+  var d1=firstDiff(truth,once);
+  simRestore(B);                                  /* restore a mid-replay snapshot */
+  for(i=J;i<K;i++) rbRunOne(t0+i,pat);
+  var twice=deepDigest(simSnapshot());
+  var d2=firstDiff(truth,twice);
+  return {ok:!d1&&!d2, fields:truth.length,
+          afterReplay:d1, afterNestedReplay:d2, from:t0, K:K, J:J};
+};
+/* Pure fidelity test for snapshot/restore — no network, no prediction. Run K
+   ticks from here with a fixed input pattern and fingerprint the result; rewind
+   to the start; run the SAME K ticks again; fingerprint again. A faithful
+   snapshot makes the two identical. Any difference is state we failed to
+   capture, and it is found here instead of as a mystery desync in a real game. */
+function rbFinger(){
+  var f=[tick,rngState,STATE,stats.score,stats.deaths,bullets.length,coins.length,lumes.length,
+         cam.x.toFixed(4),cam.y.toFixed(4)];   /* cam is sim state; omitting it hid a real bug */
+  for(var i=0;i<players.length;i++){ var q=players[i];
+    f.push(q.x.toFixed(4),q.y.toFixed(4),q.vx.toFixed(4),q.vy.toFixed(4),q.lives,q.alive?1:0,
+           q.dead?1:0,q.weapon,q.hAmmo,q.fuel.toFixed(3),q.bombs,q.fireCd,q.invT.toFixed(3),
+           q.aimX,q.aimY,q.face,q.prone?1:0); }
+  for(i=0;i<bullets.length;i++){ var b=bullets[i]; f.push(b.x.toFixed(3),b.y.toFixed(3),b.kind,b.alive?1:0); }
+  try{ f.push(JSON.stringify(K("_info"))); }catch(e){ f.push("info-err"); }
+  return f.join("|");
+}
+window.__rbSelfTest=function(K,seedPattern){
+  K=K||30;
+  var pat=seedPattern||[1,3,17,33,2,0,16,1];      /* varied bytes, incl. jump+fire */
+  function rowFor(t){ var r=new Uint8Array(players.length);
+    for(var i=0;i<players.length;i++) r[i]=pat[(t+i*3)%pat.length]; return r; }
+  var t0=tick, save=structuredClone(simSnapshot()), fp=[];
+  var i;
+  for(i=0;i<K;i++){ var r=rowFor(tick); for(var j=0;j<players.length;j++) decode(players[j],r[j]);
+    step(); if(STATE==="play"||STATE==="pause") updateCam(); fp.push(rbFinger()); }
+  var first=fp.slice();
+  simRestore(save);
+  if(tick!==t0) return {ok:false,why:"restore left tick "+tick+", expected "+t0};
+  var second=[];
+  for(i=0;i<K;i++){ var r2=rowFor(tick); for(var j2=0;j2<players.length;j2++) decode(players[j2],r2[j2]);
+    step(); if(STATE==="play"||STATE==="pause") updateCam(); second.push(rbFinger()); }
+  for(i=0;i<K;i++) if(first[i]!==second[i]){
+    return {ok:false,divergeAtTick:t0+i+1,step:i,
+            a:first[i].slice(0,400),b:second[i].slice(0,400)};
+  }
+  return {ok:true,ticks:K,from:t0};
+};
 window.__promoteStep=promoteStep;
 /* __pose: the marine sheet+frame the renderer is about to use, plus his screen box,
    so drive_anim.py can crop tight on him and name the pose instead of guessing. */

@@ -63,9 +63,12 @@ The packed log is (logTo-logFrom+1) rows of `slots` bytes, row-major, one byte
 per slot per tick, covering ticks logFrom..logTo inclusive. logTo = -1 and an
 empty log mean nothing has been recorded yet.
 
-A plain HTTP GET on the same port (no Upgrade header) still serves the live
-dashboard: `/` is HTML (auto-refresh 2s), `/status.json` the same as JSON,
-now carrying each room's log size and whether it is joinable.
+A plain HTTP GET on the same port (no Upgrade header) serves the game itself:
+`/` is the built page, `/dash` the live dashboard (auto-refresh 2s) and
+`/status.json` the same as JSON, carrying each room's log size and whether it
+is joinable. One port for the page and the socket, because a hosted service
+gets exactly one — and because same-origin means the page never has to be told
+where its relay lives.
 
 =====================================================================
  LOG MEMORY
@@ -87,6 +90,8 @@ import argparse
 import base64
 import hashlib
 import json
+import os
+import pathlib
 import random
 import socket
 import struct
@@ -96,6 +101,9 @@ import time
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 MAX_PLAYERS = 5
+# The built page, served from beside this file. A hosted service gets one port, so
+# the relay is the only door and has to hand out the game as well as the socket.
+PAGE = "orbit.html"
 ROOM_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 MAX_FRAME = 1 << 20  # 1 MiB payload cap
 
@@ -573,13 +581,54 @@ def render_dash(snap):
 
 
 def serve_http(sock, path):
-    snap = snapshot()
+    """One door. A hosted service gets exactly one port, so the page and the
+    websocket have to answer on the same one — which they already did, the port
+    just had nothing but a dashboard on it.
+      /              the game
+      /dash          the relay dashboard (it used to own /)
+      /status.json   the same, as JSON
+    """
+    body = ctype = None
     if path.startswith("/status.json"):
-        body = json.dumps(snap).encode()
+        body = json.dumps(snapshot()).encode()
         ctype = "application/json"
-    else:
-        body = render_dash(snap).encode()
+    elif path.startswith("/dash"):
+        body = render_dash(snapshot()).encode()
         ctype = "text/html; charset=utf-8"
+    else:
+        page = pathlib.Path(__file__).resolve().parent / PAGE
+        if path in ("/", "/" + PAGE):
+            try:
+                body = page.read_bytes()
+                ctype = "text/html; charset=utf-8"
+            except OSError as e:
+                # Loud, not a polite 404 onto the dashboard: a relay serving the
+                # dashboard where the game should be looks like a working deploy
+                # to everyone except the person trying to play.
+                log("error: cannot read %s: %s" % (page, e))
+                body = ("<!doctype html><meta charset=utf-8><title>no build</title>"
+                        "<pre>relay is up, but %s is missing beside relay.py.\n"
+                        "Run build.py and deploy again.</pre>" % PAGE).encode()
+                ctype = "text/html; charset=utf-8"
+                status = "500 Internal Server Error"
+                head = ("HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
+                        "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+                        % (status, ctype, len(body)))
+                try:
+                    sock.sendall(head.encode() + body)
+                except OSError:
+                    pass
+                return
+        else:
+            body = b"not found\n"
+            ctype = "text/plain; charset=utf-8"
+            head = ("HTTP/1.1 404 Not Found\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
+                    "Cache-Control: no-store\r\nConnection: close\r\n\r\n" % (ctype, len(body)))
+            try:
+                sock.sendall(head.encode() + body)
+            except OSError:
+                pass
+            return
     head = ("HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
             "Cache-Control: no-store\r\nConnection: close\r\n\r\n" % (ctype, len(body)))
     try:
@@ -646,7 +695,11 @@ def serve(sock, addr):
 def main():
     global LOG_CAP, LOG_SLACK
     ap = argparse.ArgumentParser(description="contra-orbit lockstep WebSocket relay (stdlib only)")
-    ap.add_argument("--port", type=int, default=8902, help="TCP port to listen on (default 8902)")
+    # $PORT is how a hosted platform tells a service where to listen; a service that
+    # ignores it binds a port nothing is proxied to, deploys green, and 502s every
+    # request. An explicit --port still wins over it.
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8902)),
+                    help="TCP port to listen on ($PORT, else 8902)")
     ap.add_argument("--bind", default="0.0.0.0", help="address to bind (default 0.0.0.0)")
     ap.add_argument("--log-cap", type=int, default=LOG_CAP,
                     help="input-log ticks retained per room (default %d = %d bytes/room)"
@@ -673,8 +726,13 @@ def main():
         log("error: cannot bind %s:%d: %s" % (args.bind, args.port, e))
         sys.exit(2)
     srv.listen(16)
-    log("relay listening on ws://%s:%d  (dashboard: http://%s:%d/)  log cap %d ticks = %d bytes/room"
+    page = pathlib.Path(__file__).resolve().parent / PAGE
+    log("relay listening on ws://%s:%d  (game: http://%s:%d/  dashboard: /dash)  "
+        "log cap %d ticks = %d bytes/room"
         % (args.bind, args.port, args.bind, args.port, LOG_CAP, LOG_CAP * MAX_PLAYERS))
+    # Say it at boot, not on the first player's blank screen.
+    log("serving %s (%s)" % (PAGE, ("%.1f MB" % (page.stat().st_size / 1e6))
+                             if page.exists() else "MISSING — run build.py"))
     threading.Thread(target=pinger, daemon=True).start()
     try:
         while True:

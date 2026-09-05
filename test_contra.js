@@ -508,6 +508,51 @@ assert(a !== c, 'different seed -> different state');
   assert(!CONTRA.camLocked(), 'clearing the room unlocks it again');
 })();
 
+// ---- 19b. a gate wave lands in the ROOM: a roofed map, with a wall in it ----
+// Both halves of this shipped broken and neither was caught, because the only
+// gate ever driven was level 1's: open sky, flat ground.
+//   The roof. Level 2 is the one map with a solid ceiling, and the spawn looked
+//   for a floor by scanning DOWN FROM ROW 1 — which on a roofed map is the
+//   ceiling. The whole wave landed on top of the world at y=-14: alive, above the
+//   viewport, unreachable, still counted. The camera holds until the room is
+//   clear, so the run ended there. Measured: 10 of 10 on level 2, 0 on 1 and 3.
+//   The wall. A runner hops 26px — one tile. Spawning at the screen edge put the
+//   wave behind the ten-tile pillar that stands inside level 2's gate screen,
+//   where it jumped against the face of it for the rest of the level.
+(function () {
+  var ROOF = [
+    '########################################',   // roofed map: rows 0-1 solid
+    '########################################',
+    '........................................',
+    '........................................',
+    '..............................#.........',   // a 4-tile pillar at col 30,
+    '..............................#.........',   // taller than any runner hop
+    '..............................#.........',
+    '...P..........................#.........',
+    '########################################'
+  ];
+  var W = makeW(ROOF, 3, 3 * TS);
+  W.colOffset = 100 - 20;                       // global gate col 100 -> local 20
+  CONTRA.build(W);
+  W.players[0].x = 21 * TS;
+  for (var i = 0; i < 90; i++) tick(W);
+
+  var wave = [], rs = CONTRA._state().runners, ss = CONTRA._state().snipers;
+  for (i = 0; i < rs.length; i++) if (rs[i].alive && rs[i].gate === 0) wave.push(rs[i]);
+  for (i = 0; i < ss.length; i++) if (ss[i].alive && ss[i].gate === 0) wave.push(ss[i]);
+  assert(wave.length >= 8, 'a wave lands on a roofed map too (' + wave.length + ')');
+
+  var onRoof = wave.filter(function (e) { return e.y < 2 * TS; });
+  assert(onRoof.length === 0,
+         'none of it stands on the roof, off the top of the world (' +
+         onRoof.length + ' of ' + wave.length + ' above y=' + (2 * TS) + ')');
+
+  var past = wave.filter(function (e) { return e.x > 30 * TS; });
+  assert(past.length === 0,
+         'none of it is stranded behind a wall it can never hop (' +
+         past.length + ' past col 30)');
+})();
+
 // ---- 20. a level with no gate column in range arms none ----
 (function () {
   var W = makeW(MAP, 3, 3 * TS);

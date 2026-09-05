@@ -33,7 +33,11 @@ thing that would actually be broken about it.
 import asyncio, pathlib, subprocess, sys, time
 from playwright.async_api import async_playwright
 
-URL = "http://127.0.0.1:8901/orbit.html"
+import os as _os
+# PORT= points this driver at a copy of the folder serving itself. Without it a
+# driver run from a COPY silently tests whatever 8901 happens to be serving —
+# the same shape as the stale relay that cost a night.
+URL = f"http://127.0.0.1:{_os.environ.get('PORT', '8901')}/orbit.html"
 HERE = pathlib.Path(__file__).parent
 OUT = HERE / "shots"
 OUT.mkdir(exist_ok=True)
@@ -289,7 +293,12 @@ async def test_revive(pw, browser):
         await A.keyboard.down("KeyX")
         await B.keyboard.down("ArrowRight")
         await A.keyboard.down("ArrowRight")
-        beacon = None
+        # COOP_REVIVE is OFF (the core's source). A death in co-op must now do
+        # exactly what a death in Contra does: respawn, on your own, immediately.
+        # No beacon, and no teammate standing still in a firefight to farm a
+        # corpse. The beacon machinery is still present and still asserted in
+        # test_contra.js 17/18/18b — this checks the DEFAULT, not a deletion.
+        beacon, died = None, False
         for n in range(90):
             await B.wait_for_timeout(250)
             if n % 3 == 0:                      # keep A off the floor between runners
@@ -297,84 +306,23 @@ async def test_revive(pw, browser):
             if n == 8:                          # A stops early and holds the ground behind B
                 await A.keyboard.up("ArrowRight")
             i = await A.evaluate("window.__contra()")
-            mine = [x for x in i["beacons"] if x["slot"] == 1]
-            if mine:
-                beacon = mine[0]
+            if i["beacons"]:
+                beacon = i["beacons"][0]
                 break
+            if (await A.evaluate("window.__me(1)"))["dead"]:
+                died = True
         await B.keyboard.up("ArrowRight")
         try:
             await A.keyboard.up("ArrowRight")
         except Exception:
             pass
-        check(beacon is not None, "a death in co-op drops a beacon", str(beacon))
-        if beacon is None:
-            await A.close(); await B.close(); return
-        check(beacon["slot"] == 1, "the beacon belongs to the player who fell", str(beacon))
-        alive = await A.evaluate("window.__me(0)")
-        check(not alive["dead"], "and the other player is still up to answer it", str(alive))
-
-        # Both peers must agree it exists — it is sim state, not a local effect.
-        # Read them back to back and accept EITHER "both see it" or "both agree it
-        # is already gone": a beacon can legitimately resolve between two reads,
-        # and a disagreement is the only thing that would mean lockstep broke.
-        ia = await A.evaluate("window.__contra()")
-        ib = await B.evaluate("window.__contra()")
-        na = [x["slot"] for x in ia["beacons"]]
-        nb = [x["slot"] for x in ib["beacons"]]
-        check(na == nb, "both peers see the same beacons", f"A{na} vs B{nb}")
-
-        # A walks onto it and holds. Report the gap each pass, so a failure says
-        # WHY (out of reach / leashed / A is dead) instead of just "0.0s".
-        aok = (await A.evaluate("window.__dbg().players[0]"))[4]
-        print(f"     A alive={aok}  beacon at x={beacon['x']}")
-        peak, revived, gap, held, hops = 0.0, False, None, None, 0
-        for _ in range(90):
-            i = await A.evaluate("window.__contra()")
-            mine = [x for x in i["beacons"] if x["slot"] == 1]
-            i = dict(i, beacons=mine)          # A may have fallen too; follow B's
-            if not i["beacons"]:
-                # gone: revived, or timed out. Those are different outcomes, and
-                # only one of them is the feature working.
-                revived = not (await A.evaluate("window.__dbg().players[1][4] === false"))
-                revived = bool((await A.evaluate("window.__contra()")) is not None) and peak >= 3.0
-                break
-            b = i["beacons"][0]
-            peak = max(peak, b["prog"])
-            me = await A.evaluate("window.__me()")
-            gap = b["x"] - me["x"]
-            if b["helpers"]:
-                if held:
-                    await A.keyboard.up(held); held = None   # stand still and hold it
-                await A.wait_for_timeout(400)
-                continue
-            # Coarse while far, fine while close. A flat 250ms press is ~40px at
-            # walk speed and the beacon's circle is 32px, so a fixed step can pace
-            # straight over the top of it for ever.
-            # HOLD, do not tap. Friction is 1500 and acceleration 1100, so a 55ms
-            # tap from rest travels about two pixels before it is braked back to a
-            # stop — the "fine" approach that was supposed to land inside a 32px
-            # circle was the slowest way to cross it. Hold the key and only change
-            # it when the sign of the gap flips.
-            key = "ArrowLeft" if gap < 0 else "ArrowRight"
-            if key != held:
-                if held:
-                    await A.keyboard.up(held)
-                await A.keyboard.down(key); held = key
-            # Jump on the way. B died by falling, so the ground between A and the
-            # beacon has a hole in it by construction — a walker stalls on the lip
-            # of it for ever, which looks exactly like a broken revive circle.
-            hops += 1
-            if hops % 3 == 0:
-                await A.keyboard.down("Space"); await A.wait_for_timeout(130); await A.keyboard.up("Space")
-            await A.wait_for_timeout(110)
-        if held:
-            await A.keyboard.up(held)
+        check(died, "a co-op death happened in this run (or the rest proves nothing)",
+              f"observed a dead frame: {died}")
+        check(beacon is None, "and it dropped NO beacon — plain Contra respawn", str(beacon))
+        await A.wait_for_timeout(1500)
+        back = await A.evaluate("window.__me(1)")
+        check(not back["dead"], "the fallen player is back on their feet unaided", str(back))
         await A.screenshot(path=OUT / "revive-A.png")
-        # Reported, not asserted — see the note at the top of this file. The exact
-        # claim lives in test_contra.js 17/18/18b.
-        print(f"     approach: closed to {gap}px of the 32px circle, "
-              f"peak bar {peak}s of the 3s hold "
-              f"(the fill and the revive itself are asserted in test_contra 17/18/18b)")
 
         da = await A.evaluate("window.__dbg()")
         db = await B.evaluate("window.__dbg()")

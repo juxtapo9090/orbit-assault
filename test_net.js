@@ -341,11 +341,25 @@ async function caseC() {
 
 async function caseD(port) {
   console.log("\n=== DASHBOARD ===");
-  var html = await http(port, "/");
-  assert(html.startsWith("HTTP/1.1 200 OK"), "/ must be 200, got: " + html.slice(0, 40));
-  assert(html.indexOf("Contra Orbit relay") > 0, "/ renders the dashboard");
-  assert(html.indexOf("log ") > 0, "/ shows the log size");
-  console.log("  GET /            200 OK, " + html.length + " bytes, shows log size + joinable state");
+  // `/` is the GAME now, not the dashboard. A hosted service gets exactly one
+  // port, so the relay is the only door and the page has to be behind the front
+  // one; the dashboard moved to /dash. Asserted both ways round, because the
+  // failure that matters here is the quiet one — a deploy serving the dashboard
+  // where the game should be looks healthy to everyone except a player.
+  var game = await http(port, "/");
+  assert(game.startsWith("HTTP/1.1 200 OK"), "/ must be 200, got: " + game.slice(0, 40));
+  assert(game.indexOf("Purge Protocol") > 0, "/ serves the game");
+  assert(game.indexOf("Contra Orbit relay") < 0, "/ is not the dashboard any more");
+  console.log("  GET /              200 OK, " + game.length + " bytes, the built page");
+  var missing = await http(port, "/no-such-thing");
+  assert(missing.startsWith("HTTP/1.1 404"),
+         "an unknown path 404s instead of quietly falling back to the dashboard");
+  console.log("  GET /no-such-thing 404, no silent fallback");
+  var html = await http(port, "/dash");
+  assert(html.startsWith("HTTP/1.1 200 OK"), "/dash must be 200, got: " + html.slice(0, 40));
+  assert(html.indexOf("Contra Orbit relay") > 0, "/dash renders the dashboard");
+  assert(html.indexOf("log ") > 0, "/dash shows the log size");
+  console.log("  GET /dash          200 OK, " + html.length + " bytes, shows log size + joinable state");
   var raw = await http(port, "/status.json");
   assert(raw.startsWith("HTTP/1.1 200 OK"), "/status.json must be 200");
   var snap = JSON.parse(raw.split("\r\n\r\n")[1]);

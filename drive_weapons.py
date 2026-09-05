@@ -4,7 +4,11 @@ hook, screenshot it, walk the stage lines for the crossfade, check the pool cap.
 import asyncio, pathlib, sys
 from playwright.async_api import async_playwright
 
-URL = "http://127.0.0.1:8901/orbit.html"
+import os as _os
+# PORT= points this driver at a copy of the folder serving itself. Without it a
+# driver run from a COPY silently tests whatever 8901 happens to be serving —
+# the same shape as the stale relay that cost a night.
+URL = f"http://127.0.0.1:{_os.environ.get('PORT', '8901')}/orbit.html"
 OUT = pathlib.Path(__file__).parent / "shots"
 OUT.mkdir(exist_ok=True)
 
